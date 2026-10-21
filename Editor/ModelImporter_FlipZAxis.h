@@ -1,5 +1,6 @@
 #pragma once
 #include "wiScene.h"
+#include "wiUnorderedSet.h"
 
 // Mirrors the transforms, inverse bind matrices and animation keys of a scene along the Z axis, shared by the model importers
 //	to convert between the right handed space of the model files and the left handed space of the engine (the mesh data is flipped by the importers).
@@ -27,7 +28,9 @@ inline void FlipZAxisTransforms(wi::scene::Scene& scene, wi::ecs::Entity rootEnt
 	const wi::scene::TransformComponent* root = scene.transforms.GetComponent(rootEntity);
 	if (root != nullptr)
 	{
-		// The root is not mirrored, the world matrices are only mirrored correctly if it commutes with the mirror:
+		// The root is not mirrored, the world matrices are only mirrored correctly if it commutes with the mirror.
+		//	Its local matrix is checked, which is its world matrix when it has no parent (the world matrices can be out of date here):
+		assert(!scene.hierarchy.Contains(rootEntity));
 		XMFLOAT4X4 root_matrix;
 		XMStoreFloat4x4(&root_matrix, root->GetLocalMatrix());
 		XMFLOAT4X4 root_matrix_mirrored = root_matrix;
@@ -64,28 +67,34 @@ inline void FlipZAxisTransforms(wi::scene::Scene& scene, wi::ecs::Entity rootEnt
 		}
 	}
 
-	// Flip animation data for translation and rotation
+	// Flip animation data for translation and rotation, once for each data (several channels can use the same data)
+	wi::unordered_set<wi::ecs::Entity> flipped_datas;
 	for (size_t i = 0; i < scene.animations.GetCount(); ++i)
 	{
 		auto& animation = scene.animations[i];
 
 		for (auto& channel : animation.channels)
 		{
+			const bool translation = channel.path == wi::scene::AnimationComponent::AnimationChannel::Path::TRANSLATION;
+			const bool rotation = channel.path == wi::scene::AnimationComponent::AnimationChannel::Path::ROTATION;
+			if (!translation && !rotation)
+				continue;
 			if (channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
 				continue;
 			// The data can be missing, or be in an other scene (animation retargeted without baking), which is not flipped here:
-			auto data = scene.animation_datas.GetComponent(animation.samplers[channel.samplerIndex].data);
-			if (data == nullptr)
+			const wi::ecs::Entity dataEntity = animation.samplers[channel.samplerIndex].data;
+			auto data = scene.animation_datas.GetComponent(dataEntity);
+			if (data == nullptr || !flipped_datas.insert(dataEntity).second)
 				continue;
 
-			if (channel.path == wi::scene::AnimationComponent::AnimationChannel::Path::TRANSLATION)
+			if (translation)
 			{
 				for (size_t k = 0; k < data->keyframe_data.size() / 3; ++k)
 				{
 					data->keyframe_data[k * 3 + 2] *= -1.f;
 				}
 			}
-			if (channel.path == wi::scene::AnimationComponent::AnimationChannel::Path::ROTATION)
+			if (rotation)
 			{
 				for (size_t k = 0; k < data->keyframe_data.size() / 4; ++k)
 				{

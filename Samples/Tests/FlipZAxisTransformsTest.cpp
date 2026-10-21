@@ -127,6 +127,13 @@ namespace
 			channel.path = paths[i];
 		}
 		{
+			// Two channels using the same sampler (allowed in glTF), the data must be flipped once:
+			AnimationComponent::AnimationChannel& shared = animation.channels.emplace_back();
+			shared.target = bones[2];
+			shared.samplerIndex = 0;
+			shared.path = AnimationComponent::AnimationChannel::Path::TRANSLATION;
+		}
+		{
 			// Channels without data in this scene (like an animation retargeted without baking) must be skipped:
 			AnimationComponent::AnimationSampler& sampler = animation.samplers.emplace_back();
 			sampler.data = CreateEntity();
