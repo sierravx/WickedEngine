@@ -38,13 +38,13 @@ inline void RotateRotationKeys(XMVECTOR rotation, wi::vector<float>& keys)
 //	returns the index of the new sampler. The data must be in this scene.
 inline int CopySamplerData(wi::scene::Scene& scene, wi::ecs::Entity animationEntity, wi::scene::AnimationComponent& animation, int samplerIndex, wi::ecs::Entity* copyEntity = nullptr)
 {
-	const wi::scene::AnimationComponent::AnimationSampler sampler = animation.samplers[samplerIndex];
+	wi::scene::AnimationComponent::AnimationSampler sampler = animation.samplers[samplerIndex];
 	wi::scene::AnimationDataComponent copy = *scene.animation_datas.GetComponent(sampler.data); // (copied before creating, which can move the components)
 	const wi::ecs::Entity entity = wi::ecs::CreateEntity();
 	scene.animation_datas.Create(entity) = std::move(copy);
 	scene.Component_Attach(entity, animationEntity);
-	animation.samplers.push_back(sampler);
-	animation.samplers.back().data = entity;
+	sampler.data = entity;
+	animation.samplers.push_back(std::move(sampler));
 	if (copyEntity != nullptr)
 	{
 		*copyEntity = entity;

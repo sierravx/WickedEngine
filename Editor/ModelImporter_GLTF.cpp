@@ -5235,26 +5235,25 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			KEYS_MIRRORED = 1 << 0, // keys of an other scene, which is not mirrored to the glTF space with this scene
 			KEYS_LIGHT_FLIP = 1 << 1, // rotation keys of a light node
 		};
-		std::map<std::pair<const Scene*, Entity>, int> input_accessors; // data -> keyframe times
-		std::map<std::tuple<const Scene*, Entity, Path, uint32_t>, int> output_accessors; // data, path and changes -> keyframe values
+		// (the scenes are keyed by address, as integers to be ordered in a std::map)
+		std::map<std::pair<uintptr_t, Entity>, int> input_accessors; // data -> keyframe times
+		std::map<std::tuple<uintptr_t, Entity, Path, uint32_t>, int> output_accessors; // data, path and changes -> keyframe values
 		auto get_input_accessor = [&](const Scene* data_scene, Entity dataEntity, const AnimationDataComponent& data) {
-			const auto key = std::make_pair(data_scene, dataEntity);
-			auto it = input_accessors.find(key);
-			if (it != input_accessors.end())
-				return it->second;
-			const int accessor = write_accessor(data.keyframe_times, TINYGLTF_TYPE_SCALAR);
-			input_accessors[key] = accessor;
-			return accessor;
+			auto [it, inserted] = input_accessors.try_emplace(std::make_pair(uintptr_t(data_scene), dataEntity), -1);
+			if (inserted)
+			{
+				it->second = write_accessor(data.keyframe_times, TINYGLTF_TYPE_SCALAR);
+			}
+			return it->second;
 		};
 		auto get_output_accessor = [&](const Scene* data_scene, Entity dataEntity, const AnimationDataComponent& data, Path path, int type, uint32_t changes) {
-			const auto key = std::make_tuple(data_scene, dataEntity, path, changes); // (the accessor type follows from the path)
-			auto it = output_accessors.find(key);
-			if (it != output_accessors.end())
+			// (the accessor type follows from the path)
+			auto [it, inserted] = output_accessors.try_emplace(std::make_tuple(uintptr_t(data_scene), dataEntity, path, changes), -1);
+			if (!inserted)
 				return it->second;
-			int accessor = -1;
 			if (changes == KEYS_AS_THEY_ARE)
 			{
-				accessor = write_accessor(data.keyframe_data, type);
+				it->second = write_accessor(data.keyframe_data, type);
 			}
 			else
 			{
@@ -5267,10 +5266,9 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				{
 					RotateRotationKeys(light_forward_flip, values);
 				}
-				accessor = write_accessor(values, type);
+				it->second = write_accessor(values, type);
 			}
-			output_accessors[key] = accessor;
-			return accessor;
+			return it->second;
 		};
 
 		auto interpolation = [](AnimationComponent::AnimationSampler::Mode mode) {
@@ -5393,7 +5391,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 			// glTF allows one channel for a path of a node. The engine applies the channels in order, so the last one is exported:
 			wi::vector<ExportedChannel> exported_channels(animation.channels.size());
-			wi::unordered_map<uint64_t, size_t> last_channels; // node and path -> channel
+			std::map<std::pair<int, Path>, size_t> last_channels; // node and path -> channel
 			for (size_t channel_index = 0; channel_index < animation.channels.size(); ++channel_index)
 			{
 				exported_channels[channel_index] = resolve(animation, animation.channels[channel_index]);
@@ -5401,7 +5399,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					continue;
 				for (int node : exported_channels[channel_index].nodes)
 				{
-					last_channels[(uint64_t(node) << 8) | uint64_t(animation.channels[channel_index].path)] = channel_index;
+					last_channels[std::make_pair(node, animation.channels[channel_index].path)] = channel_index;
 				}
 			}
 
@@ -5415,7 +5413,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				wi::vector<int> nodes;
 				for (int node : exported.nodes)
 				{
-					if (last_channels[(uint64_t(node) << 8) | uint64_t(channel.path)] == channel_index)
+					if (last_channels[std::make_pair(node, channel.path)] == channel_index)
 					{
 						nodes.push_back(node);
 					}
@@ -5425,13 +5423,8 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 				const AnimationComponent::AnimationSampler& sampler = animation.samplers[channel.samplerIndex];
 				const auto sampler_key = std::make_tuple(channel.samplerIndex, exported.baked ? channel.retargetIndex : -1, channel.path, exported.changes);
-				int sampler_index = -1;
-				auto made = made_samplers.find(sampler_key);
-				if (made != made_samplers.end())
-				{
-					sampler_index = made->second;
-				}
-				else
+				auto [made, inserted] = made_samplers.try_emplace(sampler_key, -1);
+				if (inserted)
 				{
 					tinygltf::AnimationSampler sampler_builder;
 					sampler_builder.input = get_input_accessor(exported.data_scene, sampler.data, *exported.data);
@@ -5452,10 +5445,10 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 						sampler_builder.output = get_output_accessor(exported.data_scene, sampler.data, *exported.data, channel.path, exported.type, exported.changes);
 					}
 					sampler_builder.interpolation = interpolation(sampler.mode);
-					sampler_index = (int)animation_builder.samplers.size();
-					animation_builder.samplers.push_back(sampler_builder);
-					made_samplers[sampler_key] = sampler_index;
+					made->second = (int)animation_builder.samplers.size();
+					animation_builder.samplers.push_back(std::move(sampler_builder));
 				}
+				const int sampler_index = made->second;
 
 				for (int node : nodes)
 				{
