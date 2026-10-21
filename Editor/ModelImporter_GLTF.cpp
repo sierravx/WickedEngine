@@ -1724,13 +1724,14 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 	}
 
 	// Create lights:
+	wi::unordered_set<Entity> rotated_lights; // the light nodes that get the rotation below
 	int lightIndex = 0;
 	for (auto& x : state.gltfModel.lights)
 	{
 		for (auto [it, end] = state.punctualLightMap.equal_range(lightIndex); it != end; it++)
 		{
 			Entity entity = it->second;
-			LightComponent& light = scene.lights[lightIndex];
+			LightComponent& light = *scene.lights.GetComponent(entity); // (the light components are not in the order of the glTF lights)
 			NameComponent& name = *scene.names.GetComponent(entity);
 			name = x.name;
 
@@ -1761,6 +1762,7 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 			// In gltf, default light direction is forward, in engine, it's downwards, so apply a rotation:
 			TransformComponent& transform = *scene.transforms.GetComponent(entity);
 			transform.RotateRollPitchYaw(XMFLOAT3(XM_PIDIV2, 0, 0));
+			rotated_lights.insert(entity);
 
 			ImportMetadata(state, entity, x.extras);
 		}
@@ -1770,10 +1772,11 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 	// The rotation keys of light nodes get the same rotation as the lights above (the exporter undoes it). It is a constant
 	//	rotation multiplied with every key, which also applies to the tangents of cubic spline keys. Data that other channels
 	//	use too gets a copy for the light channels first.
+	if (!rotated_lights.empty())
 	{
 		const XMVECTOR light_rotation = XMQuaternionRotationRollPitchYaw(XM_PIDIV2, 0, 0);
 		auto light_rotation_channel = [&](const AnimationComponent::AnimationChannel& channel) {
-			return channel.path == AnimationComponent::AnimationChannel::Path::ROTATION && scene.lights.Contains(channel.target);
+			return channel.path == AnimationComponent::AnimationChannel::Path::ROTATION && rotated_lights.count(channel.target) > 0;
 		};
 		wi::unordered_map<Entity, uint32_t> data_users; // data -> 1: light rotation channels use it, 2: other channels use it
 		for (size_t i = 0; i < scene.animations.GetCount(); ++i)
@@ -1804,14 +1807,7 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 					auto copied = copied_samplers.find(channel.samplerIndex);
 					if (copied == copied_samplers.end())
 					{
-						const AnimationDataComponent copy = *scene.animation_datas.GetComponent(dataEntity);
-						const Entity copyEntity = CreateEntity();
-						scene.animation_datas.Create(copyEntity) = copy;
-						scene.Component_Attach(copyEntity, scene.animations.GetEntity(i));
-						AnimationComponent::AnimationSampler sampler = animation.samplers[channel.samplerIndex];
-						sampler.data = copyEntity;
-						animation.samplers.push_back(sampler);
-						copied = copied_samplers.insert({ channel.samplerIndex, int(animation.samplers.size() - 1) }).first;
+						copied = copied_samplers.insert({ channel.samplerIndex, CopySamplerData(scene, scene.animations.GetEntity(i), animation, channel.samplerIndex) }).first;
 					}
 					channel.samplerIndex = copied->second;
 				}
@@ -1819,11 +1815,7 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 				const Entity rotatedEntity = animation.samplers[channel.samplerIndex].data;
 				if (rotated_datas.insert(rotatedEntity).second)
 				{
-					wi::vector<float>& keys = scene.animation_datas.GetComponent(rotatedEntity)->keyframe_data;
-					for (size_t k = 0; k + 4 <= keys.size(); k += 4)
-					{
-						XMStoreFloat4((XMFLOAT4*)&keys[k], XMQuaternionMultiply(light_rotation, XMLoadFloat4((const XMFLOAT4*)&keys[k])));
-					}
+					RotateRotationKeys(light_rotation, scene.animation_datas.GetComponent(rotatedEntity)->keyframe_data);
 				}
 			}
 		}

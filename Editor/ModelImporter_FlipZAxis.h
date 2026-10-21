@@ -24,6 +24,34 @@ inline void MirrorAnimationKeys(wi::scene::AnimationComponent::AnimationChannel:
 	}
 }
 
+// Rotates rotation keys by a constant rotation, applied before each key (like XMQuaternionMultiply(rotation, key)).
+//	The tangents of cubic spline keys are rotated the same way.
+inline void RotateRotationKeys(XMVECTOR rotation, wi::vector<float>& keys)
+{
+	for (size_t i = 0; i + 4 <= keys.size(); i += 4)
+	{
+		XMStoreFloat4((XMFLOAT4*)&keys[i], XMQuaternionMultiply(rotation, XMLoadFloat4((const XMFLOAT4*)&keys[i])));
+	}
+}
+
+// Gives the data of a sampler of an animation a copy (attached to the animation) with a new sampler that uses it,
+//	returns the index of the new sampler. The data must be in this scene.
+inline int CopySamplerData(wi::scene::Scene& scene, wi::ecs::Entity animationEntity, wi::scene::AnimationComponent& animation, int samplerIndex, wi::ecs::Entity* copyEntity = nullptr)
+{
+	const wi::scene::AnimationComponent::AnimationSampler sampler = animation.samplers[samplerIndex];
+	const wi::scene::AnimationDataComponent copy = *scene.animation_datas.GetComponent(sampler.data);
+	const wi::ecs::Entity entity = wi::ecs::CreateEntity();
+	scene.animation_datas.Create(entity) = copy;
+	scene.Component_Attach(entity, animationEntity);
+	animation.samplers.push_back(sampler);
+	animation.samplers.back().data = entity;
+	if (copyEntity != nullptr)
+	{
+		*copyEntity = entity;
+	}
+	return int(animation.samplers.size() - 1);
+}
+
 // The animation data and retargets that FlipZAxisTransforms() split, which UndoFlipZAxisSplits() puts back
 struct FlipZAxisSplits
 {
@@ -240,23 +268,17 @@ inline void FlipZAxisTransforms(wi::scene::Scene& scene, wi::ecs::Entity rootEnt
 			auto split = split_samplers.find(key);
 			if (split == split_samplers.end())
 			{
-				const wi::scene::AnimationDataComponent copy = *scene.animation_datas.GetComponent(dataEntity);
-				const wi::ecs::Entity copyEntity = wi::ecs::CreateEntity();
-				scene.animation_datas.Create(copyEntity) = copy;
-				scene.Component_Attach(copyEntity, animationEntity);
-
+				if (splits != nullptr && split_samplers.empty())
+				{
+					splits->samplers.push_back({ animationEntity, sampler_count });
+				}
+				wi::ecs::Entity copyEntity = wi::ecs::INVALID_ENTITY;
+				const int copySampler = CopySamplerData(scene, animationEntity, animation, channel.samplerIndex, &copyEntity);
 				if (splits != nullptr)
 				{
-					if (split_samplers.empty())
-					{
-						splits->samplers.push_back({ animationEntity, sampler_count });
-					}
 					splits->datas.push_back(copyEntity);
 				}
-				wi::scene::AnimationComponent::AnimationSampler sampler = animation.samplers[channel.samplerIndex];
-				sampler.data = copyEntity;
-				animation.samplers.push_back(sampler);
-				split = split_samplers.insert({ key, int(animation.samplers.size() - 1) }).first;
+				split = split_samplers.insert({ key, copySampler }).first;
 			}
 			if (splits != nullptr)
 			{
