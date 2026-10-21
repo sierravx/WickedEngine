@@ -283,6 +283,21 @@ namespace
 		wi::math::DecomposeTransform(&S, &R, &T, flat, 2);
 		Check(IsUnitQuaternion(R) && MaxDifference(Compose(S, R, T), flat) < 1e-4f, "DecomposeTransform() with a kept axis of zero length did not decompose the matrix");
 
+		// The next axis of zero length (X for kept Z) and the third axis sheared: the third axis gives the roll about the kept axis
+		{
+			const XMMATRIX base = XMMatrixRotationRollPitchYaw(0.4f, 0.7f, 0.2f);
+			XMMATRIX M = XMMatrixIdentity();
+			M.r[0] = XMVectorZero();
+			M.r[1] = base.r[1] + 0.3f * base.r[2];
+			M.r[2] = 1.5f * base.r[2];
+			wi::math::DecomposeTransform(&S, &R, &T, M, 2);
+			const XMVECTOR y = XMVector3Normalize(M.r[1] - XMVector3Dot(M.r[1], XMVector3Normalize(M.r[2])) * XMVector3Normalize(M.r[2]));
+			Check(IsUnitQuaternion(R) &&
+				XMVectorGetX(XMVector3Length(XMVector3Rotate(canonical[2], R) - XMVector3Normalize(M.r[2]))) < 1e-5f &&
+				XMVectorGetX(XMVector3Length(XMVector3Rotate(canonical[1], R) - y)) < 1e-4f,
+				"DecomposeTransform() with a kept axis ignored the third axis when the next axis has zero length");
+		}
+
 		// A mirrored matrix turning slowly: the rotation must not jump (the mirroring must stay on the same axis)
 		for (int keepAxis = 0; keepAxis < 3; ++keepAxis)
 		{

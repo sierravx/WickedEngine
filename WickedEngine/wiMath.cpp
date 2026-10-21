@@ -288,9 +288,15 @@ namespace wi::math
 		// The kept axis keeps its direction, the next axis is made perpendicular to it and carries the mirroring.
 		//	These are always the same axes, not chosen by length, so that the rotation doesn't jump between
 		//	two decompositions when the lengths of the other axes are close (like for a mirrored light that turns):
-		const int b = (keepAxis + 1) % 3;
-		const int c = (keepAxis + 2) % 3;
-		DecomposeOrthonormalized(outScale, outRotQuat, outTrans, M, lengths, keepAxis, b, c, b);
+		const int mirror = (keepAxis + 1) % 3;
+		int b = mirror;
+		int c = (keepAxis + 2) % 3;
+		if (lengths[b] < decompose_epsilon && lengths[c] >= decompose_epsilon)
+		{
+			// A zero length axis has no direction, then the other one is made perpendicular instead:
+			std::swap(b, c);
+		}
+		DecomposeOrthonormalized(outScale, outRotQuat, outTrans, M, lengths, keepAxis, b, c, mirror);
 	}
 
 	const XMFLOAT4& GetHaltonSequence(int idx)
