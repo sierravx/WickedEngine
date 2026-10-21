@@ -5040,6 +5040,8 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			auto& animation = wiscene.animations[anim_id];
 			for(auto& channel : animation.channels)
 			{
+				if(channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
+					continue;
 				if(animdata_vectype.find(animation.samplers[channel.samplerIndex].data) == animdata_vectype.end())
 					animdata_vectype[animation.samplers[channel.samplerIndex].data] = 
 						(channel.path == AnimationComponent::AnimationChannel::Path::SCALE) ? TINYGLTF_TYPE_VEC3 :
@@ -5137,22 +5139,34 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			animation_builder.name = name->name;
 		}
 
-		for(auto& sampler : animation.samplers)
+		// Samplers whose data is not in this scene (like an animation retargeted without baking) are left out,
+		//	so the samplers are renumbered for the channels:
+		wi::vector<int> sampler_remap(animation.samplers.size(), -1);
+		for(size_t sampler_index = 0; sampler_index < animation.samplers.size(); ++sampler_index)
 		{
+			auto& sampler = animation.samplers[sampler_index];
+			auto dataset = animation_datasets.find(sampler.data);
+			if(dataset == animation_datasets.end())
+				continue;
+
 			tinygltf::AnimationSampler sampler_builder;
-			sampler_builder.input = (int)animation_datasets[sampler.data][1];
-			sampler_builder.output = (int)animation_datasets[sampler.data][3];
+			sampler_builder.input = (int)dataset->second[1];
+			sampler_builder.output = (int)dataset->second[3];
 			sampler_builder.interpolation = 
 				(sampler.mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE) ? "CUBICSPLINE" :
 				(sampler.mode == AnimationComponent::AnimationSampler::Mode::STEP) ? "STEP" : "LINEAR";
 
+			sampler_remap[sampler_index] = (int)animation_builder.samplers.size();
 			animation_builder.samplers.push_back(sampler_builder);
 		}
 		for(auto& channel : animation.channels)
 		{
+			if(channel.samplerIndex < 0 || channel.samplerIndex >= (int)sampler_remap.size() || sampler_remap[channel.samplerIndex] < 0)
+				continue;
+
 			tinygltf::AnimationChannel channel_builder;
 			channel_builder.target_node = state.nodeMap[channel.target];
-			channel_builder.sampler = (int)channel.samplerIndex;
+			channel_builder.sampler = sampler_remap[channel.samplerIndex];
 			channel_builder.target_path = 
 				(channel.path == AnimationComponent::AnimationChannel::Path::SCALE) ? "scale" :
 				(channel.path == AnimationComponent::AnimationChannel::Path::ROTATION) ? "rotation" :
@@ -5160,6 +5174,8 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			
 			animation_builder.channels.push_back(channel_builder);
 		}
+		if(animation_builder.channels.empty())
+			continue; // a glTF animation must have channels
 		state.gltfModel.animations.push_back(animation_builder);
 	}
 
