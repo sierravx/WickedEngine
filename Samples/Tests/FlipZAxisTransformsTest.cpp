@@ -193,6 +193,24 @@ namespace
 			other_channel.samplerIndex = int(animation.samplers.size() - 1);
 			other_channel.retargetIndex = 1;
 			other_channel.path = AnimationComponent::AnimationChannel::Path::TRANSLATION;
+
+			// The retarget from this scene also used by a channel from the other scene: each must be mirrored for its own source
+			const int other_sampler_index = other_channel.samplerIndex; // (before adding a channel, which can move the one referenced)
+			AnimationComponent::AnimationChannel& shared_retarget_channel = animation.channels.emplace_back();
+			shared_retarget_channel.target = bones[0];
+			shared_retarget_channel.samplerIndex = other_sampler_index;
+			shared_retarget_channel.retargetIndex = 0;
+			shared_retarget_channel.path = AnimationComponent::AnimationChannel::Path::TRANSLATION;
+
+			// A translation sampler of the other scene on an entity that has (scale) data in this scene too: this scene's data is not flipped by it
+			AnimationComponent::AnimationSampler& colliding_sampler = animation.samplers.emplace_back();
+			colliding_sampler.data = dataEntities[2];
+			colliding_sampler.scene = &other_scene;
+			other_scene.animation_datas.Create(dataEntities[2]).keyframe_data = translation_keys;
+			AnimationComponent::AnimationChannel& colliding_channel = animation.channels.emplace_back();
+			colliding_channel.target = bones[2];
+			colliding_channel.samplerIndex = int(animation.samplers.size() - 1);
+			colliding_channel.path = AnimationComponent::AnimationChannel::Path::TRANSLATION;
 		}
 		{
 			// (created last, because creating an other animation can move the one referenced above)
@@ -224,7 +242,17 @@ namespace
 		XMVECTOR S, R, T;
 		Check(!XMMatrixDecompose(&S, &R, &T, world_original[1]), "precondition: a world matrix of the test hierarchy should have shear" + variant);
 
-		FlipZAxisTransforms(scene, root);
+		const size_t sampler_count = scene.animations.GetComponent(animationEntity)->samplers.size();
+		const size_t retarget_count = scene.animations.GetComponent(animationEntity)->retargets.size();
+		const size_t data_count = scene.animation_datas.GetCount();
+		wi::vector<std::pair<int, int>> channel_indices; // sampler and retarget of each channel
+		for (const auto& channel : scene.animations.GetComponent(animationEntity)->channels)
+		{
+			channel_indices.push_back({ channel.samplerIndex, channel.retargetIndex });
+		}
+
+		FlipZAxisSplits splits;
+		FlipZAxisTransforms(scene, root, &splits);
 		UpdateWorldMatrices(scene);
 
 		const char* names[3] = { "first", "second", "third" };
@@ -271,10 +299,18 @@ namespace
 			Check(MaxDifference(XMLoadFloat4x4(&same.dstRelativeMatrix), F * dst * F) == 0 && MaxDifference(XMLoadFloat4x4(&same.srcRelativeParentMatrix), F * src * F) == 0, "the matrices of a retarget from this scene were not mirrored" + variant);
 			Check(MaxDifference(XMLoadFloat4x4(&from_other.dstRelativeMatrix), F * dst) == 0 && MaxDifference(XMLoadFloat4x4(&from_other.srcRelativeParentMatrix), src * F) == 0, "the matrices of a retarget from an other scene were not mirrored" + variant);
 			Check(other_scene.animation_datas.GetComponent(flipped_animation.samplers[flipped_animation.channels[shared_channel_index + 3].samplerIndex].data)->keyframe_data == translation_keys, "the keys of an other scene were changed" + variant);
+
+			const AnimationComponent::AnimationChannel& shared_retarget_channel = flipped_animation.channels[shared_channel_index + 4];
+			Check(shared_retarget_channel.retargetIndex >= 2 && shared_retarget_channel.retargetIndex < (int)flipped_animation.retargets.size(), "a retarget shared by sources of this and an other scene was not split" + variant);
+			if (shared_retarget_channel.retargetIndex >= 2 && shared_retarget_channel.retargetIndex < (int)flipped_animation.retargets.size())
+			{
+				const AnimationComponent::RetargetSourceData& copy = flipped_animation.retargets[shared_retarget_channel.retargetIndex];
+				Check(MaxDifference(XMLoadFloat4x4(&copy.dstRelativeMatrix), F * dst) == 0 && MaxDifference(XMLoadFloat4x4(&copy.srcRelativeParentMatrix), src * F) == 0, "the split retarget was not mirrored for its source in an other scene" + variant);
+			}
 		}
 
 		// Flipping back restores the original state exactly (this is how the glTF export restores the scene)
-		FlipZAxisTransforms(scene, root);
+		FlipZAxisTransforms(scene, root, &splits);
 		bool restored = scene.transforms.GetCount() == transforms_original.size();
 		for (size_t i = 0; restored && i < scene.transforms.GetCount(); ++i)
 		{
@@ -293,6 +329,16 @@ namespace
 		Check(std::memcmp(&restored_animation.retargets[0].dstRelativeMatrix, &retarget_dst, sizeof(XMFLOAT4X4)) == 0 && std::memcmp(&restored_animation.retargets[0].srcRelativeParentMatrix, &retarget_src, sizeof(XMFLOAT4X4)) == 0 &&
 			std::memcmp(&restored_animation.retargets[1].dstRelativeMatrix, &retarget_dst, sizeof(XMFLOAT4X4)) == 0 && std::memcmp(&restored_animation.retargets[1].srcRelativeParentMatrix, &retarget_src, sizeof(XMFLOAT4X4)) == 0,
 			"flipping back did not restore the retarget matrices" + variant);
+
+		// The splits are undone
+		UndoFlipZAxisSplits(scene, splits);
+		const AnimationComponent& undone = *scene.animations.GetComponent(animationEntity);
+		bool undone_ok = undone.samplers.size() == sampler_count && undone.retargets.size() == retarget_count && scene.animation_datas.GetCount() == data_count && undone.channels.size() == channel_indices.size();
+		for (size_t i = 0; undone_ok && i < channel_indices.size(); ++i)
+		{
+			undone_ok = undone.channels[i].samplerIndex == channel_indices[i].first && undone.channels[i].retargetIndex == channel_indices[i].second;
+		}
+		Check(undone_ok, "UndoFlipZAxisSplits() did not restore the samplers, retargets and animation data" + variant);
 	}
 }
 
