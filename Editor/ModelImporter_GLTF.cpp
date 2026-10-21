@@ -5134,27 +5134,6 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			return accessor_index;
 		};
 
-		// The accessors of animation data are shared by the samplers that use the same data:
-		wi::unordered_map<Entity, int> input_accessors; // data -> keyframe times
-		wi::unordered_map<uint64_t, int> output_accessors; // data and accessor type -> keyframe values
-		auto get_input_accessor = [&](Entity dataEntity, const AnimationDataComponent& data) {
-			auto it = input_accessors.find(dataEntity);
-			if (it != input_accessors.end())
-				return it->second;
-			const int accessor = write_accessor(data.keyframe_times, TINYGLTF_TYPE_SCALAR);
-			input_accessors[dataEntity] = accessor;
-			return accessor;
-		};
-		auto get_output_accessor = [&](Entity dataEntity, const AnimationDataComponent& data, int type) {
-			const uint64_t key = (uint64_t(dataEntity) << 8) | uint64_t(type);
-			auto it = output_accessors.find(key);
-			if (it != output_accessors.end())
-				return it->second;
-			const int accessor = write_accessor(data.keyframe_data, type);
-			output_accessors[key] = accessor;
-			return accessor;
-		};
-
 		// A channel retargeted without baking is evaluated from the keys of the source animation at runtime, as
 		//	dstRelativeMatrix * source local transform * srcRelativeParentMatrix (see Scene::RunAnimationUpdateSystem()),
 		//	it is baked the same way. The tangents of cubic spline keys are derivatives, they are carried through the
@@ -5215,46 +5194,37 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 						b = -b;
 					return (a - b) / (2 * step) + radial * result;
 				}
-				const float step = 0.001f / std::max(1.0f, XMVectorGetX(XMVector3Length(tangent)));
+				// The step follows the size of the scale, for the precision of large scales:
+				const float step = 0.001f * std::max(1.0f, XMVectorGetX(XMVector3Length(value))) / std::max(1.0f, XMVectorGetX(XMVector3Length(tangent)));
 				return (retargeted(value + step * tangent) - retargeted(value - step * tangent)) / (2 * step);
 			};
 
 			// A cubic spline key is an in-tangent, a value and an out-tangent:
 			const size_t stride = cubic ? components * 3 : components;
 			const size_t value_offset = cubic ? components : 0;
-			XMVECTOR previous = XMVectorZero();
+			XMVECTOR previous_value = XMVectorZero();
+			XMVECTOR previous_result = XMVectorZero();
 			for (size_t offset = 0; offset + stride <= values.size(); offset += stride)
 			{
 				const XMVECTOR value = load(offset + value_offset);
 				const XMVECTOR result = retargeted(value);
-				// The rotations stay in the hemisphere of the previous key, so they are interpolated the short way:
-				const float sign = path == Path::ROTATION && offset > 0 && XMVectorGetX(XMVector4Dot(result, previous)) < 0 ? -1.0f : 1.0f;
+				// A decomposed rotation can come out as either of its two quaternions, the one is taken that keeps the
+				//	hemisphere relation of the source keys (the runtime interpolates them, then retargets):
+				float sign = 1;
+				if (path == Path::ROTATION && offset > 0)
+				{
+					const bool source_flips = XMVectorGetX(XMVector4Dot(value, previous_value)) < 0;
+					const bool result_flips = XMVectorGetX(XMVector4Dot(result, previous_result)) < 0;
+					sign = source_flips == result_flips ? 1.0f : -1.0f;
+				}
 				if (cubic)
 				{
 					store(offset, sign * retargeted_tangent(value, result, load(offset)));
 					store(offset + 2 * components, sign * retargeted_tangent(value, result, load(offset + 2 * components)));
 				}
 				store(offset + value_offset, sign * result);
-				previous = sign * result;
-			}
-		};
-
-		// Mirrors keys (and the tangents of cubic spline keys) like the flip of the scene mirrors them, for keys of an other scene:
-		auto mirror_keys = [](Path path, wi::vector<float>& values) {
-			if (path == Path::TRANSLATION)
-			{
-				for (size_t i = 2; i < values.size(); i += 3)
-				{
-					values[i] = -values[i];
-				}
-			}
-			else if (path == Path::ROTATION)
-			{
-				for (size_t i = 0; i + 1 < values.size(); i += 4)
-				{
-					values[i] = -values[i];
-					values[i + 1] = -values[i + 1];
-				}
+				previous_value = value;
+				previous_result = sign * result;
 			}
 		};
 
@@ -5268,10 +5238,155 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			}
 		};
 
+		// The keys of a channel are written as they are, or with these changes. The same data with the same changes shares accessors:
+		enum KeyChanges : uint32_t
+		{
+			KEYS_AS_THEY_ARE = 0,
+			KEYS_MIRRORED = 1 << 0, // keys of an other scene, which is not mirrored to the glTF space with this scene
+			KEYS_LIGHT_FLIP = 1 << 1, // rotation keys of a light node
+		};
+		wi::unordered_map<const Scene*, wi::unordered_map<Entity, int>> input_accessors; // data -> keyframe times
+		wi::unordered_map<const Scene*, wi::unordered_map<uint64_t, int>> output_accessors; // data, accessor type and changes -> keyframe values
+		auto get_input_accessor = [&](const Scene* data_scene, Entity dataEntity, const AnimationDataComponent& data) {
+			auto& accessors = input_accessors[data_scene];
+			auto it = accessors.find(dataEntity);
+			if (it != accessors.end())
+				return it->second;
+			const int accessor = write_accessor(data.keyframe_times, TINYGLTF_TYPE_SCALAR);
+			accessors[dataEntity] = accessor;
+			return accessor;
+		};
+		auto get_output_accessor = [&](const Scene* data_scene, Entity dataEntity, const AnimationDataComponent& data, Path path, int type, uint32_t changes) {
+			auto& accessors = output_accessors[data_scene];
+			const uint64_t key = (uint64_t(dataEntity) << 16) | (uint64_t(type) << 8) | uint64_t(changes);
+			auto it = accessors.find(key);
+			if (it != accessors.end())
+				return it->second;
+			int accessor = -1;
+			if (changes == KEYS_AS_THEY_ARE)
+			{
+				accessor = write_accessor(data.keyframe_data, type);
+			}
+			else
+			{
+				wi::vector<float> values = data.keyframe_data;
+				if (changes & KEYS_MIRRORED)
+				{
+					MirrorAnimationKeys(path, values);
+				}
+				if (changes & KEYS_LIGHT_FLIP)
+				{
+					flip_light_keys(values);
+				}
+				accessor = write_accessor(values, type);
+			}
+			accessors[key] = accessor;
+			return accessor;
+		};
+
 		auto interpolation = [](AnimationComponent::AnimationSampler::Mode mode) {
 			return
 				(mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE) ? "CUBICSPLINE" :
 				(mode == AnimationComponent::AnimationSampler::Mode::STEP) ? "STEP" : "LINEAR";
+		};
+
+		// The nodes that show a mesh, for its morph target weights (the engine keeps the weights in the mesh):
+		wi::unordered_map<Entity, wi::vector<int>> mesh_nodes;
+		for (size_t object_id = 0; object_id < wiscene.objects.GetCount(); ++object_id)
+		{
+			auto node = state.nodeMap.find(wiscene.objects.GetEntity(object_id));
+			if (node != state.nodeMap.end())
+			{
+				mesh_nodes[wiscene.objects[object_id].meshID].push_back(node->second);
+			}
+		}
+
+		// What a channel of the scene exports, if anything:
+		struct ExportedChannel
+		{
+			bool valid = false;
+			wi::vector<int> nodes;
+			const char* target_path = nullptr;
+			int type = TINYGLTF_TYPE_VEC3;
+			const Scene* data_scene = nullptr;
+			const AnimationDataComponent* data = nullptr;
+			bool baked = false; // retargeted, with a source transform
+			uint32_t changes = KEYS_AS_THEY_ARE;
+		};
+		auto resolve = [&](const AnimationComponent& animation, const AnimationComponent::AnimationChannel& channel) {
+			ExportedChannel exported;
+			switch (channel.path)
+			{
+			case Path::TRANSLATION:
+				exported.target_path = "translation";
+				break;
+			case Path::ROTATION:
+				exported.target_path = "rotation";
+				exported.type = TINYGLTF_TYPE_VEC4;
+				break;
+			case Path::SCALE:
+				exported.target_path = "scale";
+				break;
+			case Path::WEIGHTS:
+			{
+				// The weights are in the mesh (the target is the mesh, or an object of it), every node of that mesh shows them:
+				Entity meshEntity = channel.target;
+				if (!wiscene.meshes.Contains(meshEntity))
+				{
+					const ObjectComponent* object = wiscene.objects.GetComponent(channel.target);
+					meshEntity = object == nullptr ? INVALID_ENTITY : object->meshID;
+				}
+				const MeshComponent* mesh = wiscene.meshes.GetComponent(meshEntity);
+				if (mesh == nullptr || mesh->morph_targets.empty())
+					return exported;
+				auto nodes = mesh_nodes.find(meshEntity);
+				if (nodes != mesh_nodes.end())
+				{
+					exported.nodes = nodes->second;
+				}
+				exported.target_path = "weights";
+				exported.type = TINYGLTF_TYPE_SCALAR;
+			}
+			break;
+			default:
+				return exported; // light, material, camera, sound, script and other channels have nothing to animate in glTF
+			}
+			if (channel.path != Path::WEIGHTS)
+			{
+				auto node = state.nodeMap.find(channel.target);
+				if (node != state.nodeMap.end())
+				{
+					exported.nodes.push_back(node->second);
+				}
+			}
+			if (exported.nodes.empty())
+				return exported; // the target is not exported as a node (it was removed, or it has no transform)
+
+			if (channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
+				return exported;
+			const AnimationComponent::AnimationSampler& sampler = animation.samplers[channel.samplerIndex];
+			exported.data_scene = sampler.scene == nullptr ? &wiscene : (const Scene*)sampler.scene;
+			exported.data = exported.data_scene->animation_datas.GetComponent(sampler.data);
+			const size_t components = exported.type == TINYGLTF_TYPE_VEC4 ? 4 : (exported.type == TINYGLTF_TYPE_VEC3 ? 3 : 1);
+			if (exported.data == nullptr || exported.data->keyframe_times.empty() || exported.data->keyframe_data.size() < components)
+				return exported; // nothing to export (glTF accessors can't be empty)
+
+			const bool other_scene = exported.data_scene != &wiscene;
+			const bool retargeted = channel.path != Path::WEIGHTS && channel.retargetIndex >= 0 && channel.retargetIndex < (int)animation.retargets.size();
+			if (retargeted && exported.data_scene->transforms.Contains(animation.retargets[channel.retargetIndex].source))
+			{
+				exported.baked = true;
+			}
+			else if (other_scene)
+			{
+				exported.changes |= KEYS_MIRRORED; // without the source transform, retargeted keys are played as they are
+			}
+			if (channel.path == Path::ROTATION && wiscene.lights.Contains(channel.target))
+			{
+				exported.changes |= KEYS_LIGHT_FLIP;
+			}
+			exported.valid = true;
+			return exported;
 		};
 
 		for (size_t anim_id = 0; anim_id < wiscene.animations.GetCount(); ++anim_id)
@@ -5287,123 +5402,61 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				animation_builder.name = name->name;
 			}
 
-			wi::unordered_map<int, int> sampler_remap; // sampler index and accessor type -> glTF sampler index, for the keys that are written as they are
-			wi::unordered_map<uint64_t, size_t> target_channels; // node and path -> glTF channel index
-			for (const AnimationComponent::AnimationChannel& channel : animation.channels)
+			// glTF allows one channel for a path of a node. The engine applies the channels in order, so the last one is exported:
+			wi::vector<ExportedChannel> exported_channels(animation.channels.size());
+			wi::unordered_map<uint64_t, size_t> last_channels; // node and path -> channel
+			for (size_t channel_index = 0; channel_index < animation.channels.size(); ++channel_index)
 			{
-				const char* target_path = nullptr;
-				int type = TINYGLTF_TYPE_VEC3;
-				wi::vector<int> target_nodes;
-				switch (channel.path)
-				{
-				case Path::TRANSLATION:
-					target_path = "translation";
-					break;
-				case Path::ROTATION:
-					target_path = "rotation";
-					type = TINYGLTF_TYPE_VEC4;
-					break;
-				case Path::SCALE:
-					target_path = "scale";
-					break;
-				case Path::WEIGHTS:
-				{
-					// The weights are in the mesh (the target is the mesh, or an object of it), every node of that mesh shows them:
-					Entity meshEntity = channel.target;
-					if (!wiscene.meshes.Contains(meshEntity))
-					{
-						const ObjectComponent* object = wiscene.objects.GetComponent(channel.target);
-						meshEntity = object == nullptr ? INVALID_ENTITY : object->meshID;
-					}
-					const MeshComponent* mesh = wiscene.meshes.GetComponent(meshEntity);
-					if (mesh == nullptr || mesh->morph_targets.empty())
-						continue;
-					for (size_t object_id = 0; object_id < wiscene.objects.GetCount(); ++object_id)
-					{
-						if (wiscene.objects[object_id].meshID != meshEntity)
-							continue;
-						auto node = state.nodeMap.find(wiscene.objects.GetEntity(object_id));
-						if (node != state.nodeMap.end())
-						{
-							target_nodes.push_back(node->second);
-						}
-					}
-					target_path = "weights";
-					type = TINYGLTF_TYPE_SCALAR;
-				}
-				break;
-				default:
-					continue; // light, material, camera, sound, script and other channels have nothing to animate in glTF
-				}
-				if (channel.path != Path::WEIGHTS)
-				{
-					auto node = state.nodeMap.find(channel.target);
-					if (node != state.nodeMap.end())
-					{
-						target_nodes.push_back(node->second);
-					}
-				}
-				if (target_nodes.empty())
-					continue; // the target is not exported as a node (it was removed, or it has no transform)
-
-				if (channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
+				exported_channels[channel_index] = resolve(animation, animation.channels[channel_index]);
+				if (!exported_channels[channel_index].valid)
 					continue;
+				for (int node : exported_channels[channel_index].nodes)
+				{
+					last_channels[(uint64_t(node) << 8) | uint64_t(animation.channels[channel_index].path)] = channel_index;
+				}
+			}
+
+			wi::unordered_map<int, int> sampler_remap; // sampler index, accessor type and key changes -> glTF sampler index, for keys that are not baked
+			for (size_t channel_index = 0; channel_index < animation.channels.size(); ++channel_index)
+			{
+				const AnimationComponent::AnimationChannel& channel = animation.channels[channel_index];
+				const ExportedChannel& exported = exported_channels[channel_index];
+				if (!exported.valid)
+					continue;
+				wi::vector<int> nodes;
+				for (int node : exported.nodes)
+				{
+					if (last_channels[(uint64_t(node) << 8) | uint64_t(channel.path)] == channel_index)
+					{
+						nodes.push_back(node);
+					}
+				}
+				if (nodes.empty())
+					continue; // a later channel animates the same
+
 				const AnimationComponent::AnimationSampler& sampler = animation.samplers[channel.samplerIndex];
-				const Scene& data_scene = sampler.scene == nullptr ? wiscene : *(const Scene*)sampler.scene;
-				const AnimationDataComponent* data = data_scene.animation_datas.GetComponent(sampler.data);
-				const size_t components = type == TINYGLTF_TYPE_VEC4 ? 4 : (type == TINYGLTF_TYPE_VEC3 ? 3 : 1);
-				if (data == nullptr || data->keyframe_times.empty() || data->keyframe_data.size() < components)
-					continue; // nothing to export (glTF accessors can't be empty)
-
-				// The keys as they are written, when they differ from the animation data:
-				bool own_values = false;
-				wi::vector<float> values;
-				const bool other_scene = &data_scene != &wiscene;
-				const bool retargeted = channel.path != Path::WEIGHTS && channel.retargetIndex >= 0 && channel.retargetIndex < (int)animation.retargets.size();
-				if (retargeted)
-				{
-					values = data->keyframe_data;
-					own_values = true;
-					const AnimationComponent::RetargetSourceData& retarget = animation.retargets[channel.retargetIndex];
-					const TransformComponent* source = data_scene.transforms.GetComponent(retarget.source);
-					if (source != nullptr)
-					{
-						bake_retarget(retarget, *source, channel.path, sampler.mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE, values);
-					}
-					else if (other_scene)
-					{
-						mirror_keys(channel.path, values); // without the source transform the keys are played as they are
-					}
-				}
-				else if (other_scene && channel.path != Path::WEIGHTS)
-				{
-					values = data->keyframe_data;
-					own_values = true;
-					mirror_keys(channel.path, values);
-				}
-				if (channel.path == Path::ROTATION && wiscene.lights.Contains(channel.target))
-				{
-					if (!own_values)
-					{
-						values = data->keyframe_data;
-						own_values = true;
-					}
-					flip_light_keys(values);
-				}
-
 				int sampler_index = -1;
-				if (own_values)
+				if (exported.baked)
 				{
+					// Each retargeted channel has its own baked keys:
+					const AnimationComponent::RetargetSourceData& retarget = animation.retargets[channel.retargetIndex];
+					wi::vector<float> values = exported.data->keyframe_data;
+					bake_retarget(retarget, *exported.data_scene->transforms.GetComponent(retarget.source), channel.path, sampler.mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE, values);
+					if (exported.changes & KEYS_LIGHT_FLIP)
+					{
+						flip_light_keys(values);
+					}
+
 					tinygltf::AnimationSampler sampler_builder;
-					sampler_builder.input = get_input_accessor(sampler.data, *data);
-					sampler_builder.output = write_accessor(values, type);
+					sampler_builder.input = get_input_accessor(exported.data_scene, sampler.data, *exported.data);
+					sampler_builder.output = write_accessor(values, exported.type);
 					sampler_builder.interpolation = interpolation(sampler.mode);
 					sampler_index = (int)animation_builder.samplers.size();
 					animation_builder.samplers.push_back(sampler_builder);
 				}
 				else
 				{
-					const int sampler_key = channel.samplerIndex * 256 + type;
+					const int sampler_key = (channel.samplerIndex << 16) | (exported.type << 8) | int(exported.changes);
 					auto remapped = sampler_remap.find(sampler_key);
 					if (remapped != sampler_remap.end())
 					{
@@ -5412,8 +5465,8 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					else
 					{
 						tinygltf::AnimationSampler sampler_builder;
-						sampler_builder.input = get_input_accessor(sampler.data, *data);
-						sampler_builder.output = get_output_accessor(sampler.data, *data, type);
+						sampler_builder.input = get_input_accessor(exported.data_scene, sampler.data, *exported.data);
+						sampler_builder.output = get_output_accessor(exported.data_scene, sampler.data, *exported.data, channel.path, exported.type, exported.changes);
 						sampler_builder.interpolation = interpolation(sampler.mode);
 						sampler_index = (int)animation_builder.samplers.size();
 						animation_builder.samplers.push_back(sampler_builder);
@@ -5421,25 +5474,13 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					}
 				}
 
-				for (int target_node : target_nodes)
+				for (int node : nodes)
 				{
 					tinygltf::AnimationChannel channel_builder;
-					channel_builder.target_node = target_node;
+					channel_builder.target_node = node;
 					channel_builder.sampler = sampler_index;
-					channel_builder.target_path = target_path;
-
-					// glTF allows one channel for a path of a node, the engine applies the channels in order, so the last one is kept:
-					const uint64_t target_key = (uint64_t(target_node) << 8) | uint64_t(channel.path);
-					auto existing = target_channels.find(target_key);
-					if (existing != target_channels.end())
-					{
-						animation_builder.channels[existing->second] = channel_builder;
-					}
-					else
-					{
-						target_channels[target_key] = animation_builder.channels.size();
-						animation_builder.channels.push_back(channel_builder);
-					}
+					channel_builder.target_path = exported.target_path;
+					animation_builder.channels.push_back(channel_builder);
 				}
 			}
 

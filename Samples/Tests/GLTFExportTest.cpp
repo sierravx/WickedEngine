@@ -6,6 +6,8 @@
 #define TINYGLTF_NO_STB_IMAGE_WRITE
 #include "tiny_gltf.h"
 
+#include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -165,6 +167,8 @@ namespace
 		scene.transforms.GetComponent(light)->rotation_local = light_rotation;
 		scene.transforms.GetComponent(light)->SetDirty();
 		scene.lights.Create(light).SetType(LightComponent::SPOT);
+		Entity second_light = CreateNode(scene, "SecondLight", XMFLOAT3(0, 6, 0));
+		scene.lights.Create(second_light).SetType(LightComponent::POINT);
 
 		// Meshes with a morph target, the weights of which can be animated (the first one has two objects)
 		Entity material = CreateEntity();
@@ -188,7 +192,7 @@ namespace
 		// Cubic spline keys are an in-tangent, a value and an out-tangent:
 		const wi::vector<float> cubic_translation_keys = { 0.5f, 0, 0, 0, 0, 1, 1, 0.5f, 0, 0, 1, 0, 1, 0, 0, 0.2f, 0.3f, 0.4f };
 		const XMVECTOR q0 = XMQuaternionRotationRollPitchYaw(0.1f, 0.2f, 0.3f);
-		const XMVECTOR q1 = XMQuaternionRotationRollPitchYaw(0.5f, -0.4f, 0.2f);
+		const XMVECTOR q1 = -XMQuaternionRotationRollPitchYaw(0.5f, -0.4f, 0.2f); // in the other hemisphere of q0
 		const XMFLOAT4 m[4] = { XMFLOAT4(0.1f, 0.2f, -0.1f, 0.3f), XMFLOAT4(-0.2f, 0.1f, 0.4f, 0.05f), XMFLOAT4(0.3f, -0.1f, 0.2f, -0.2f), XMFLOAT4(0.05f, 0.2f, 0.1f, 0.1f) };
 		const wi::vector<float> cubic_rotation_keys = {
 			m[0].x, m[0].y, m[0].z, m[0].w, XMVectorGetX(q0), XMVectorGetY(q0), XMVectorGetZ(q0), XMVectorGetW(q0), m[1].x, m[1].y, m[1].z, m[1].w,
@@ -204,7 +208,11 @@ namespace
 		Entity light_data = CreateData(scene, times, light_keys);
 		Entity empty_data = CreateData(scene, {}, {});
 		Entity other_data = CreateData(other, times, retarget_keys);
-		Entity other_weight_data = CreateData(other, times, weight_keys);
+		// An other scene can have data on the same entity as this scene (when entities are not remapped):
+		const wi::vector<float> other_weight_keys = { 0.3f, 0.7f };
+		const Entity other_weight_data = weight_data;
+		other.animation_datas.Create(other_weight_data).keyframe_times = times;
+		other.animation_datas.GetComponent(other_weight_data)->keyframe_data = other_weight_keys;
 
 		XMFLOAT4X4 retarget_dst, retarget_src;
 		const XMVECTOR qD = XMQuaternionRotationRollPitchYaw(0.3f, 0.5f, 0.7f);
@@ -257,6 +265,7 @@ namespace
 			add_channel(cubic_rotation_destination, add_sampler(cubic_rotation_data, nullptr, cubic), Path::ROTATION, add_retarget(source)); // baked with tangents
 			add_channel(missing_source_destination, add_sampler(other_data, &other), Path::TRANSLATION, add_retarget(no_transform)); // played as it is
 			add_channel(light, add_sampler(light_data), Path::ROTATION); // with the light's forward flip
+			add_channel(second_light, add_sampler(light_data), Path::ROTATION); // the same keys as the first light
 			add_channel(other_mesh, add_sampler(other_weight_data, &other), Path::WEIGHTS); // the mesh as target, weights of an other scene
 		}
 		{
@@ -324,6 +333,9 @@ namespace
 			Check(false, "the exported file could not be loaded: " + err);
 			return TEST_FAILED;
 		}
+		// Importing the file back gives the keys of the scene (in the engine space)
+		Scene imported;
+		ImportModel_GLTF(output_file, imported);
 		std::remove(output_file);
 		for (const tinygltf::Buffer& buffer : model.buffers)
 		{
@@ -331,6 +343,35 @@ namespace
 			{
 				std::remove(buffer.uri.c_str());
 			}
+		}
+		auto imported_keys = [&](const std::string& name, Path path) {
+			const Entity target = imported.Entity_FindByName(name);
+			for (size_t i = 0; i < imported.animations.GetCount(); ++i)
+			{
+				const AnimationComponent& animation = imported.animations[i];
+				for (const AnimationComponent::AnimationChannel& channel : animation.channels)
+				{
+					if (channel.target == target && channel.path == path && channel.samplerIndex >= 0 && channel.samplerIndex < (int)animation.samplers.size())
+					{
+						const AnimationDataComponent* data = imported.animation_datas.GetComponent(animation.samplers[channel.samplerIndex].data);
+						if (data != nullptr)
+							return data->keyframe_data;
+					}
+				}
+			}
+			return wi::vector<float>();
+		};
+		Check(imported.lights.GetCount() == 2 && imported.lights.Contains(imported.Entity_FindByName("Light")), "the lights did not import back");
+		Check(Near(imported_keys("A", Path::TRANSLATION), last_translation_keys), "the translation keys did not import back as they were");
+		{
+			const wi::vector<float> keys = imported_keys("Light", Path::ROTATION);
+			bool same = keys.size() == light_keys.size();
+			for (size_t i = 0; same && i + 4 <= keys.size(); i += 4)
+			{
+				// The same rotation, as either of its two quaternions:
+				same = std::abs(std::abs(XMVectorGetX(XMVector4Dot(XMLoadFloat4((const XMFLOAT4*)&keys[i]), XMLoadFloat4((const XMFLOAT4*)&light_keys[i])))) - 1) < 1e-4f;
+			}
+			Check(same, "the rotation keys of a light did not import back as they were");
 		}
 
 		auto node_index = [&](const std::string& name) {
@@ -346,7 +387,18 @@ namespace
 		if (model.animations.size() != 1)
 			return TEST_FAILED;
 		const tinygltf::Animation& exported = model.animations[0];
-		Check(exported.channels.size() == 12, "expected 12 exported channels, got " + std::to_string(exported.channels.size()));
+		Check(exported.channels.size() == 13, "expected 13 exported channels, got " + std::to_string(exported.channels.size()));
+		{
+			wi::vector<uint8_t> used(exported.samplers.size(), 0);
+			for (const tinygltf::AnimationChannel& channel : exported.channels)
+			{
+				if (channel.sampler >= 0 && channel.sampler < (int)used.size())
+				{
+					used[channel.sampler] = 1;
+				}
+			}
+			Check(std::find(used.begin(), used.end(), 0) == used.end(), "a sampler that no channel uses was written");
+		}
 
 		for (const tinygltf::AnimationSampler& sampler : exported.samplers)
 		{
@@ -384,7 +436,7 @@ namespace
 
 		Check(Near(find_values("A", "translation"), MirrorTranslations(last_translation_keys)), "the last translation channel of a node was not the exported one");
 		Check(Near(find_values("Morphed", "weights"), weight_keys) && Near(find_values("MorphedInstance", "weights"), weight_keys), "the morph target weights were not exported for every object of the mesh");
-		Check(Near(find_values("OtherMorphed", "weights"), weight_keys), "the weights of an other scene, with the mesh as target, were not exported");
+		Check(Near(find_values("OtherMorphed", "weights"), other_weight_keys), "the weights of an other scene, with the mesh as target, were not exported (or mixed up with the same entity of this scene)");
 		Check(Near(find_values("B", "translation"), MirrorTranslations(shared_keys)), "the translation keys shared with a scale channel were not exported mirrored");
 		Check(Near(find_values("B", "scale"), shared_keys), "the scale keys shared with a translation channel were not exported as they are");
 		Check(Near(find_values("Destination", "translation"), expected_same), "the channel retargeted from this scene was not baked");
@@ -410,14 +462,33 @@ namespace
 				}
 			}
 			Check(ok, "the tangents of a retargeted cubic spline rotation were not baked as derivatives");
+			if (values.size() == cubic_rotation_keys.size())
+			{
+				const float exported_relation = XMVectorGetX(XMVector4Dot(XMLoadFloat4((const XMFLOAT4*)&values[4]), XMLoadFloat4((const XMFLOAT4*)&values[16])));
+				Check(exported_relation < 0, "the hemisphere relation of retargeted cubic spline rotation keys was not kept");
+			}
 		}
 
 		// The first light key is the light's own rotation, which is exported as the node's rotation (with the forward flip)
 		{
 			const wi::vector<float> values = find_values("Light", "rotation");
-			const tinygltf::Node& node = model.nodes[node_index("Light")];
-			const wi::vector<float> node_rotation = { float(node.rotation[0]), float(node.rotation[1]), float(node.rotation[2]), float(node.rotation[3]) };
-			Check(values.size() == 8 && Near(wi::vector<float>(values.begin(), values.begin() + 4), node_rotation), "the rotation keys of a light did not get the light's forward flip");
+			const int node = node_index("Light");
+			Check(node >= 0 && model.nodes[node].rotation.size() == 4, "the light node was not exported");
+			if (node >= 0 && model.nodes[node].rotation.size() == 4)
+			{
+				const std::vector<double>& rotation = model.nodes[node].rotation;
+				const wi::vector<float> node_rotation = { float(rotation[0]), float(rotation[1]), float(rotation[2]), float(rotation[3]) };
+				Check(values.size() == 8 && Near(wi::vector<float>(values.begin(), values.begin() + 4), node_rotation), "the rotation keys of a light did not get the light's forward flip");
+			}
+			auto output_of = [&](const std::string& name) {
+				for (const tinygltf::AnimationChannel& channel : exported.channels)
+				{
+					if (channel.target_node == node_index(name) && channel.target_path == "rotation")
+						return exported.samplers[channel.sampler].output;
+				}
+				return -1;
+			};
+			Check(output_of("Light") >= 0 && output_of("Light") == output_of("SecondLight"), "the same changed keys of two lights were written twice");
 		}
 
 		if (failures > 0)
@@ -462,7 +533,16 @@ int main(int argc, char** argv)
 	}
 	close(device_created[1]);
 	int status = 0;
-	waitpid(pid, &status, 0);
+	pid_t waited = -1;
+	do
+	{
+		waited = waitpid(pid, &status, 0);
+	} while (waited < 0 && errno == EINTR);
+	if (waited != pid)
+	{
+		std::cerr << "GLTFExport test failed: waitpid() failed\n";
+		return 1;
+	}
 	char byte = 0;
 	const bool created = read(device_created[0], &byte, 1) == 1;
 	close(device_created[0]);
