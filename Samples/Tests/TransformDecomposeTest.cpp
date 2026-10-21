@@ -296,6 +296,16 @@ namespace
 				XMVectorGetX(XMVector3Length(XMVector3Rotate(canonical[2], R) - XMVector3Normalize(M.r[2]))) < 1e-5f &&
 				XMVectorGetX(XMVector3Length(XMVector3Rotate(canonical[1], R) - y)) < 1e-4f,
 				"DecomposeTransform() with a kept axis ignored the third axis when the next axis has zero length");
+			Check(XMVector3GreaterOrEqual(S, XMVectorZero()), "DecomposeTransform() with a kept axis gave a negative scale to an axis of zero length");
+
+			// The next axis parallel to the kept axis (fully sheared) has no direction either
+			M.r[0] = 0.5f * base.r[2];
+			wi::math::DecomposeTransform(&S, &R, &T, M, 2);
+			Check(IsUnitQuaternion(R) &&
+				XMVectorGetX(XMVector3Length(XMVector3Rotate(canonical[2], R) - XMVector3Normalize(M.r[2]))) < 1e-5f &&
+				XMVectorGetX(XMVector3Length(XMVector3Rotate(canonical[1], R) - y)) < 1e-4f &&
+				XMVector3GreaterOrEqual(S, XMVectorZero()),
+				"DecomposeTransform() with a kept axis ignored the third axis when the next axis is parallel to the kept axis");
 		}
 
 		// A mirrored matrix turning slowly: the rotation must not jump (the mirroring must stay on the same axis)

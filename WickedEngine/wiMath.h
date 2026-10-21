@@ -443,7 +443,8 @@ namespace wi::math
 	void DecomposeTransform(XMVECTOR* outScale, XMVECTOR* outRotQuat, XMVECTOR* outTrans, const XMMATRIX& M);
 	// Like DecomposeTransform() above, but the rotated keepAxis (0: X, 1: Y, 2: Z) always points exactly along that axis of the matrix,
 	//	also with shear or mirroring: the shear is dropped from the other axes, and the mirroring is always carried by the next axis
-	//	((keepAxis + 1) % 3), so that the rotation doesn't jump when the matrix changes a little.
+	//	((keepAxis + 1) % 3), so that the rotation doesn't jump when the matrix changes a little. (When an axis loses its direction,
+	//	by getting zero length or parallel to the kept axis, the rotation about the kept axis is taken from the remaining axis.)
 	//	Use it when one of the axes has a meaning, like the direction of a light.
 	//	Without shear and mirroring, the result of XMMatrixDecompose() is returned unchanged.
 	//	If the kept axis has zero length (it has no direction), the result of DecomposeTransform() above is returned.
