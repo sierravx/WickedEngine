@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "wiScene.h"
 #include "ModelImporter.h"
+#include "ModelImporter_FlipZAxis.h"
 
 // ufbx Documentation: https://ufbx.github.io/
 #define UFBX_REAL_TYPE float
@@ -11,7 +12,7 @@ using namespace wi::graphics;
 using namespace wi::scene;
 using namespace wi::ecs;
 
-void FlipZAxis(Scene& scene, Entity rootEntity, wi::unordered_map<size_t, TransformComponent>& transforms_original);
+void FlipZAxis(Scene& scene, Entity rootEntity);
 void Import_Mixamo_Bone(Scene& scene, Entity rootEntity, Entity boneEntity);
 void Import_Makehuman_Bone(Scene& scene, Entity rootEntity, Entity boneEntity);
 
@@ -774,13 +775,12 @@ void ImportModel_FBX(const std::string& filename, wi::scene::Scene& scene)
 
 	// Note: we use custom FlipZAxis function for transforming to left-handed space
 	//	because it works better than ufbx library's space conversion helpers, especially for ragdolls that will be generated
-	wi::unordered_map<size_t, TransformComponent> transforms_original; // original transform states, can be used to restore after flip (like GLTF export)
-	FlipZAxis(scene, rootEntity, transforms_original);
+	FlipZAxis(scene, rootEntity);
 
 	scene.Update(0);
 }
 
-void FlipZAxis(Scene& scene, Entity rootEntity, wi::unordered_map<size_t, TransformComponent>& transforms_original)
+void FlipZAxis(Scene& scene, Entity rootEntity)
 {
 	// Flip mesh data first
 	for (size_t i = 0; i < scene.meshes.GetCount(); ++i)
@@ -812,131 +812,8 @@ void FlipZAxis(Scene& scene, Entity rootEntity, wi::unordered_map<size_t, Transf
 		mesh.CreateRenderData();
 	}
 
-	// Flip scene's transformComponents
-	bool state_restore = (transforms_original.size() > 0);
-	if (!state_restore)
-	{
-		wi::unordered_map<wi::ecs::Entity, wi::ecs::Entity> hierarchy_list;
-		wi::unordered_map<size_t, wi::scene::TransformComponent> correction_queue;
-
-		for (size_t i = 0; i < scene.transforms.GetCount(); ++i)
-		{
-			auto transformEntity = scene.transforms.GetEntity(i);
-			if (transformEntity == rootEntity)
-				continue;
-
-			correction_queue[i] = scene.transforms[i];
-
-			auto hierarchy = scene.hierarchy.GetComponent(transformEntity);
-			if (transformEntity != rootEntity && hierarchy != nullptr)
-			{
-				hierarchy_list[transformEntity] = hierarchy->parentID;
-				scene.Component_Detach(transformEntity);
-			}
-		}
-		transforms_original.insert(correction_queue.begin(), correction_queue.end());
-		for (auto& correction_pair : correction_queue)
-		{
-			auto& transform = scene.transforms[correction_pair.first];
-			auto& transform_original = correction_pair.second;
-
-			XMVECTOR V_S, V_R, V_T;
-			XMMatrixDecompose(&V_S, &V_R, &V_T, XMLoadFloat4x4(&transform_original.world));
-			XMFLOAT3 pos, scale;
-			XMFLOAT4 rot;
-			XMStoreFloat3(&scale, V_S);
-			XMStoreFloat3(&pos, V_T);
-			XMStoreFloat4(&rot, V_R);
-			pos.z *= -1.f;
-			rot.x *= -1.f;
-			rot.y *= -1.f;
-
-			auto build_m =
-				XMMatrixScalingFromVector(XMLoadFloat3(&scale)) *
-				XMMatrixRotationQuaternion(XMLoadFloat4(&rot)) *
-				XMMatrixTranslationFromVector(XMLoadFloat3(&pos));
-
-			XMFLOAT4X4 build_m4;
-			XMStoreFloat4x4(&build_m4, build_m);
-
-			transform.world = build_m4;
-			transform.ApplyTransform();
-		}
-		for (auto& hierarchy_pair : hierarchy_list)
-		{
-			scene.Component_Attach(hierarchy_pair.first, hierarchy_pair.second);
-		}
-	}
-	else
-	{
-		for (size_t i = 0; i < scene.transforms.GetCount(); ++i)
-		{
-			auto transform_original_find = transforms_original.find(i);
-			if (transform_original_find != transforms_original.end())
-			{
-				auto& transform = scene.transforms[i];
-				transform = transform_original_find->second;
-			}
-		}
-		transforms_original.clear();
-	}
-
-	// Flip armature's bind pose
-	for (size_t i = 0; i < scene.armatures.GetCount(); ++i)
-	{
-		auto& armature = scene.armatures[i];
-		for (int i = 0; i < armature.inverseBindMatrices.size(); ++i)
-		{
-			auto& bind = armature.inverseBindMatrices[i];
-
-			XMVECTOR V_S, V_R, V_T;
-			XMMatrixDecompose(&V_S, &V_R, &V_T, XMLoadFloat4x4(&bind));
-			XMFLOAT3 pos, scale;
-			XMFLOAT4 rot;
-			XMStoreFloat3(&scale, V_S);
-			XMStoreFloat3(&pos, V_T);
-			XMStoreFloat4(&rot, V_R);
-			pos.z *= -1.f;
-			rot.x *= -1.f;
-			rot.y *= -1.f;
-
-			auto build_m =
-				XMMatrixScalingFromVector(XMLoadFloat3(&scale)) *
-				XMMatrixRotationQuaternion(XMLoadFloat4(&rot)) *
-				XMMatrixTranslationFromVector(XMLoadFloat3(&pos));
-			XMFLOAT4X4 build_m4;
-			XMStoreFloat4x4(&build_m4, build_m);
-
-			bind = build_m4;
-		}
-	}
-
-	// Flip animation data for translation and rotation
-	for (size_t i = 0; i < scene.animations.GetCount(); ++i)
-	{
-		auto& animation = scene.animations[i];
-
-		for (auto& channel : animation.channels)
-		{
-			auto data = scene.animation_datas.GetComponent(animation.samplers[channel.samplerIndex].data);
-
-			if (channel.path == wi::scene::AnimationComponent::AnimationChannel::Path::TRANSLATION)
-			{
-				for (size_t k = 0; k < data->keyframe_data.size() / 3; ++k)
-				{
-					data->keyframe_data[k * 3 + 2] *= -1.f;
-				}
-			}
-			if (channel.path == wi::scene::AnimationComponent::AnimationChannel::Path::ROTATION)
-			{
-				for (size_t k = 0; k < data->keyframe_data.size() / 4; ++k)
-				{
-					data->keyframe_data[k * 4] *= -1.f;
-					data->keyframe_data[k * 4 + 1] *= -1.f;
-				}
-			}
-		}
-	}
+	// Flip transforms, bind poses and animations
+	FlipZAxisTransforms(scene, rootEntity);
 }
 
 void Import_Mixamo_Bone(Scene& scene, Entity rootEntity, Entity boneEntity)

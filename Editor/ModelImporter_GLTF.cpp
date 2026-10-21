@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "wiScene.h"
 #include "ModelImporter.h"
+#include "ModelImporter_FlipZAxis.h"
 #include "wiRandom.h"
 
 #include "Utility/stb_image.h"
@@ -150,7 +151,6 @@ struct LoaderState
 	//Export states
 	wi::unordered_map<std::string, int> textureMap; // path -> textureid
 	wi::unordered_map<Entity, int> nodeMap;// entity -> node
-	wi::unordered_map<size_t, TransformComponent> transforms_original; // original transform states
 };
 
 void Import_Extension_VRM(LoaderState& state);
@@ -376,131 +376,8 @@ void FlipZAxis(LoaderState& state)
 		mesh.FlipCulling(); // calls CreateRenderData
 	}
 
-	// Flip scene's transformComponents
-	bool state_restore = (state.transforms_original.size() > 0);
-	if(!state_restore)
-	{
-		wi::unordered_map<wi::ecs::Entity, wi::ecs::Entity> hierarchy_list;
-		wi::unordered_map<size_t, wi::scene::TransformComponent> correction_queue;
-
-		for(size_t i = 0; i < wiscene.transforms.GetCount(); ++i)
-		{
-			auto transformEntity = wiscene.transforms.GetEntity(i);
-			if(transformEntity == state.rootEntity)
-				continue;
-
-			correction_queue[i] = wiscene.transforms[i];
-
-			auto hierarchy = wiscene.hierarchy.GetComponent(transformEntity);
-			if(transformEntity != state.rootEntity && hierarchy != nullptr)
-			{
-				hierarchy_list[transformEntity] = hierarchy->parentID;
-				wiscene.Component_Detach(transformEntity);
-			}
-		}
-		state.transforms_original.insert(correction_queue.begin(), correction_queue.end());
-		for(auto& correction_pair : correction_queue)
-		{
-			auto& transform = wiscene.transforms[correction_pair.first];
-			auto& transform_original = correction_pair.second;
-
-			XMVECTOR V_S,V_R,V_T;
-			XMMatrixDecompose(&V_S, &V_R, &V_T, XMLoadFloat4x4(&transform_original.world));
-			XMFLOAT3 pos, scale;
-			XMFLOAT4 rot;
-			XMStoreFloat3(&scale, V_S);
-			XMStoreFloat3(&pos, V_T);
-			XMStoreFloat4(&rot, V_R);
-			pos.z *= -1.f;
-			rot.x *= -1.f;
-			rot.y *= -1.f;
-
-			auto build_m = 
-				XMMatrixScalingFromVector(XMLoadFloat3(&scale)) *
-				XMMatrixRotationQuaternion(XMLoadFloat4(&rot)) *
-				XMMatrixTranslationFromVector(XMLoadFloat3(&pos));
-
-			XMFLOAT4X4 build_m4;
-			XMStoreFloat4x4(&build_m4, build_m);
-
-			transform.world = build_m4;
-			transform.ApplyTransform();
-		}
-		for(auto& hierarchy_pair : hierarchy_list)
-		{
-			wiscene.Component_Attach(hierarchy_pair.first, hierarchy_pair.second);
-		}
-	}
-	else
-	{
-		for(size_t i = 0; i < wiscene.transforms.GetCount(); ++i)
-		{
-			auto transform_original_find = state.transforms_original.find(i);
-			if(transform_original_find != state.transforms_original.end())
-			{
-				auto& transform = wiscene.transforms[i];
-				transform = transform_original_find->second;
-			}
-		}
-		state.transforms_original.clear();
-	}
-
-	// Flip armature's bind pose
-	for(size_t i = 0; i < wiscene.armatures.GetCount(); ++i)
-	{
-		auto& armature = wiscene.armatures[i];
-		for(int i = 0; i < armature.inverseBindMatrices.size(); ++i)
-		{
-			auto& bind = armature.inverseBindMatrices[i];
-			
-			XMVECTOR V_S,V_R,V_T;
-			XMMatrixDecompose(&V_S, &V_R, &V_T, XMLoadFloat4x4(&bind));
-			XMFLOAT3 pos, scale;
-			XMFLOAT4 rot;
-			XMStoreFloat3(&scale, V_S);
-			XMStoreFloat3(&pos, V_T);
-			XMStoreFloat4(&rot, V_R);
-			pos.z *= -1.f;
-			rot.x *= -1.f;
-			rot.y *= -1.f;
-
-			auto build_m = 
-				XMMatrixScalingFromVector(XMLoadFloat3(&scale)) *
-				XMMatrixRotationQuaternion(XMLoadFloat4(&rot)) *
-				XMMatrixTranslationFromVector(XMLoadFloat3(&pos));
-			XMFLOAT4X4 build_m4;
-			XMStoreFloat4x4(&build_m4, build_m);
-
-			bind = build_m4;
-		}
-	}
-
-	// Flip animation data for translation and rotation
-	for(size_t i = 0; i < wiscene.animations.GetCount(); ++i)
-	{
-		auto& animation = wiscene.animations[i];
-		
-		for(auto& channel : animation.channels)
-		{
-			auto data = wiscene.animation_datas.GetComponent(animation.samplers[channel.samplerIndex].data);
-			
-			if(channel.path == wi::scene::AnimationComponent::AnimationChannel::Path::TRANSLATION)
-			{
-				for(size_t k = 0; k < data->keyframe_data.size()/3; ++k)
-				{
-					data->keyframe_data[k*3+2] *= -1.f;
-				}
-			}
-			if(channel.path == wi::scene::AnimationComponent::AnimationChannel::Path::ROTATION)
-			{
-				for(size_t k = 0; k < data->keyframe_data.size()/4; ++k)
-				{
-					data->keyframe_data[k*4] *= -1.f;
-					data->keyframe_data[k*4+1] *= -1.f;
-				}
-			}
-		}
-	}
+	// Flip transforms, bind poses and animations
+	FlipZAxisTransforms(wiscene, state.rootEntity);
 }
 
 static const wi::unordered_set<std::string> SUPPORTED_EXTENSIONS = {
@@ -2061,10 +1938,9 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 	Import_Extension_VRMC(state);
 
 	// Humanoid look-at is enabled by default and aims at the origin until a
-	// target is set. Left on, the scene.Update() below would turn the head (and
-	// eyes) toward the origin, and FlipZAxis() would then decompose that turn
-	// into the bones' local transforms, baking a rotation the file does not
-	// contain. Hold it off across both updates and restore it afterwards.
+	// target is set. Left on, the scene.Update() calls below would turn the head
+	// (and eyes) toward the origin while importing. Hold it off across both
+	// updates and restore it afterwards.
 	wi::vector<uint8_t> lookat_was_enabled(scene.humanoids.GetCount());
 	for (size_t i = 0; i < scene.humanoids.GetCount(); ++i)
 	{
