@@ -126,6 +126,19 @@ namespace
 			channel.samplerIndex = i;
 			channel.path = paths[i];
 		}
+		{
+			// Channels without data in this scene (like an animation retargeted without baking) must be skipped:
+			AnimationComponent::AnimationSampler& sampler = animation.samplers.emplace_back();
+			sampler.data = CreateEntity();
+			AnimationComponent::AnimationChannel& channel = animation.channels.emplace_back();
+			channel.target = bones[1];
+			channel.samplerIndex = int(animation.samplers.size() - 1);
+			channel.path = AnimationComponent::AnimationChannel::Path::TRANSLATION;
+			AnimationComponent::AnimationChannel& invalid = animation.channels.emplace_back();
+			invalid.target = bones[1];
+			invalid.samplerIndex = int(animation.samplers.size());
+			invalid.path = AnimationComponent::AnimationChannel::Path::ROTATION;
+		}
 
 		XMMATRIX world_original[3];
 		for (int i = 0; i < 3; ++i)

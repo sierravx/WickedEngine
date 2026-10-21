@@ -9,10 +9,39 @@
 //	The inverse bind matrices are mirrored as F * M * F, with F = scale(1, 1, -1), which is exact for any matrix.
 //	rootEntity is not mirrored (it can be INVALID_ENTITY to mirror every transform). The world matrices of the other
 //	transforms are the mirror of the original ones if the root's world matrix commutes with the mirror, like the identity
-//	or a half turn about the Y axis.
+//	or a half turn about the Y axis (this is asserted for the root's local matrix in debug builds).
 //	Calling it a second time restores the original state.
 inline void FlipZAxisTransforms(wi::scene::Scene& scene, wi::ecs::Entity rootEntity)
 {
+	// F * M * F with F = scale(1, 1, -1) negates the elements where exactly one of the row and the column is Z:
+	auto mirror = [](XMFLOAT4X4& m) {
+		m._13 *= -1.f;
+		m._23 *= -1.f;
+		m._43 *= -1.f;
+		m._31 *= -1.f;
+		m._32 *= -1.f;
+		m._34 *= -1.f;
+	};
+
+#ifndef NDEBUG
+	const wi::scene::TransformComponent* root = scene.transforms.GetComponent(rootEntity);
+	if (root != nullptr)
+	{
+		// The root is not mirrored, the world matrices are only mirrored correctly if it commutes with the mirror:
+		XMFLOAT4X4 root_matrix;
+		XMStoreFloat4x4(&root_matrix, root->GetLocalMatrix());
+		XMFLOAT4X4 root_matrix_mirrored = root_matrix;
+		mirror(root_matrix_mirrored);
+		for (int i = 0; i < 4; ++i)
+		{
+			for (int j = 0; j < 4; ++j)
+			{
+				assert(std::abs(root_matrix.m[i][j] - root_matrix_mirrored.m[i][j]) < 0.0001f);
+			}
+		}
+	}
+#endif // NDEBUG
+
 	for (size_t i = 0; i < scene.transforms.GetCount(); ++i)
 	{
 		if (scene.transforms.GetEntity(i) == rootEntity)
@@ -31,13 +60,7 @@ inline void FlipZAxisTransforms(wi::scene::Scene& scene, wi::ecs::Entity rootEnt
 		auto& armature = scene.armatures[i];
 		for (XMFLOAT4X4& bind : armature.inverseBindMatrices)
 		{
-			// F * M * F negates the elements where exactly one of the row and the column is Z:
-			bind._13 *= -1.f;
-			bind._23 *= -1.f;
-			bind._43 *= -1.f;
-			bind._31 *= -1.f;
-			bind._32 *= -1.f;
-			bind._34 *= -1.f;
+			mirror(bind);
 		}
 	}
 
@@ -48,7 +71,12 @@ inline void FlipZAxisTransforms(wi::scene::Scene& scene, wi::ecs::Entity rootEnt
 
 		for (auto& channel : animation.channels)
 		{
+			if (channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
+				continue;
+			// The data can be missing, or be in an other scene (animation retargeted without baking), which is not flipped here:
 			auto data = scene.animation_datas.GetComponent(animation.samplers[channel.samplerIndex].data);
+			if (data == nullptr)
+				continue;
 
 			if (channel.path == wi::scene::AnimationComponent::AnimationChannel::Path::TRANSLATION)
 			{
