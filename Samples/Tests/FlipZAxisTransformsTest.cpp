@@ -146,6 +146,19 @@ namespace
 			invalid.samplerIndex = int(animation.samplers.size());
 			invalid.path = AnimationComponent::AnimationChannel::Path::ROTATION;
 		}
+		{
+			// (created last, because creating an other animation can move the one referenced above)
+			// An other animation using the same data (like an animation retargeted without baking in the same scene), the data must be flipped once:
+			Entity otherAnimationEntity = CreateEntity();
+			AnimationComponent& other = scene.animations.Create(otherAnimationEntity);
+			scene.Component_Attach(otherAnimationEntity, root);
+			AnimationComponent::AnimationSampler& sampler = other.samplers.emplace_back();
+			sampler.data = dataEntities[1];
+			AnimationComponent::AnimationChannel& channel = other.channels.emplace_back();
+			channel.target = bones[2];
+			channel.samplerIndex = 0;
+			channel.path = AnimationComponent::AnimationChannel::Path::ROTATION;
+		}
 
 		XMMATRIX world_original[3];
 		for (int i = 0; i < 3; ++i)
