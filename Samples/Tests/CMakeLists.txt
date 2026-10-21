@@ -62,6 +62,16 @@ target_link_libraries(FlipZAxisTransformsTest PRIVATE WickedEngine)
 add_test(NAME FlipZAxisTransformsTest COMMAND FlipZAxisTransformsTest)
 set_target_properties(FlipZAxisTransformsTest PROPERTIES FOLDER "Tests")
 
+# Linux only: elsewhere the error message box of the failed device creation is modal
+if (UNIX AND NOT APPLE)
+	add_executable(GraphicsDeviceFatalErrorTest
+		GraphicsDeviceFatalErrorTest.cpp
+	)
+	target_link_libraries(GraphicsDeviceFatalErrorTest PRIVATE WickedEngine)
+	add_test(NAME GraphicsDeviceFatalErrorTest COMMAND GraphicsDeviceFatalErrorTest)
+	set_target_properties(GraphicsDeviceFatalErrorTest PROPERTIES FOLDER "Tests")
+endif()
+
 
 if (MSVC)
 	set_property(TARGET Tests PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")

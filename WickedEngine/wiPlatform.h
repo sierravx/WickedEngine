@@ -53,6 +53,8 @@
 typedef void* HMODULE;
 #endif // defined(PLATFORM_LINUX) || defined(PLATFORM_APPLE)
 
+#include <cstdlib>
+
 namespace wi::platform
 {
 #ifdef _WIN32
@@ -85,6 +87,14 @@ namespace wi::platform
 		std::exit(0);
 #endif
 		
+	}
+
+	// Exit() only asks the application to quit and then returns to the caller (except on Apple).
+	//	After an error that the caller can't continue from, like failing to create the graphics device,
+	//	this ends the process right away instead (the error should be reported before calling it).
+	[[noreturn]] inline void ExitFatal()
+	{
+		std::exit(EXIT_FAILURE);
 	}
 
 	struct WindowProperties

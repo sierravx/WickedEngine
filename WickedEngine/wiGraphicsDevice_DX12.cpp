@@ -1699,7 +1699,7 @@ std::mutex queue_locker;
 		if (FAILED(hr))
 		{
 			wilog_messagebox("ID3D12Device::CreateCommandQueue[CopyAllocator] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 		dx12_check(queue->SetName(L"CopyAllocator"));
 #endif // PLATFORM_XBOX
@@ -2245,7 +2245,7 @@ std::mutex queue_locker;
 			std::stringstream ss("");
 			ss << "Failed to load dxgi.dll! ERROR: " << std::hex << GetLastError();
 			wi::helper::messageBox(ss.str(), "Error!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		HMODULE dx12 = LoadLibraryEx(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -2254,7 +2254,7 @@ std::mutex queue_locker;
 			std::stringstream ss("");
 			ss << "Failed to load d3d12.dll! ERROR: " << std::hex << GetLastError();
 			wi::helper::messageBox(ss.str(), "Error!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		CreateDXGIFactory2 = (PFN_CREATE_DXGI_FACTORY_2)wiGetProcAddress(dxgi, "CreateDXGIFactory2");
@@ -2264,7 +2264,7 @@ std::mutex queue_locker;
 			std::stringstream ss("");
 			ss << "Failed to load CreateDXGIFactory2! ERROR: " << std::hex << GetLastError();
 			wi::helper::messageBox(ss.str(), "Error!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 #ifdef _DEBUG
@@ -2282,7 +2282,7 @@ std::mutex queue_locker;
 			std::stringstream ss("");
 			ss << "Failed to load D3D12CreateDevice! ERROR: " << std::hex << GetLastError();
 			wi::helper::messageBox(ss.str(), "Error!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		D3D12CreateVersionedRootSignatureDeserializer = (PFN_D3D12_CREATE_VERSIONED_ROOT_SIGNATURE_DESERIALIZER)wiGetProcAddress(dx12, "D3D12CreateVersionedRootSignatureDeserializer");
@@ -2292,7 +2292,7 @@ std::mutex queue_locker;
 			std::stringstream ss("");
 			ss << "Failed to load D3D12CreateVersionedRootSignatureDeserializer! ERROR: " << std::hex << GetLastError();
 			wi::helper::messageBox(ss.str(), "Error!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		D3D12SerializeRootSignature = (PFN_D3D12_SERIALIZE_ROOT_SIGNATURE)wiGetProcAddress(dx12, "D3D12SerializeRootSignature");
@@ -2302,7 +2302,7 @@ std::mutex queue_locker;
 			std::stringstream ss("");
 			ss << "Failed to load D3D12SerializeRootSignature! ERROR: " << std::hex << GetLastError();
 			wi::helper::messageBox(ss.str(), "Error!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		if (validationMode != ValidationMode::Disabled)
@@ -2370,7 +2370,7 @@ std::mutex queue_locker;
 		if (FAILED(hr))
 		{
 			wilog_messagebox("CreateDXGIFactory2 failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		// Determines whether tearing support is available for fullscreen borderless windows.
@@ -2463,14 +2463,14 @@ std::mutex queue_locker;
 		if (dxgiAdapter == nullptr)
 		{
 			wilog_messagebox("DXGI: No capable graphics adapter found!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		assert(device != nullptr);
 		if (device == nullptr)
 		{
 			wilog_messagebox("D3D12: Device couldn't be created!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		if (validationMode != ValidationMode::Disabled)
@@ -2530,7 +2530,7 @@ std::mutex queue_locker;
 		if (FAILED(hr))
 		{
 			wilog_messagebox("D3D12MA::CreateAllocator failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		{
@@ -2542,7 +2542,7 @@ std::mutex queue_locker;
 			if (FAILED(hr))
 			{
 				wilog_messagebox("ID3D12Device::CreateCommandQueue[QUEUE_GRAPHICS] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-				wi::platform::Exit();
+				wi::platform::ExitFatal();
 			}
 			dx12_check(queues[QUEUE_GRAPHICS].queue->SetName(L"QUEUE_GRAPHICS"));
 		}
@@ -2556,7 +2556,7 @@ std::mutex queue_locker;
 			if (FAILED(hr))
 			{
 				wilog_messagebox("ID3D12Device::CreateCommandQueue[QUEUE_COMPUTE] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-				wi::platform::Exit();
+				wi::platform::ExitFatal();
 			}
 			dx12_check(queues[QUEUE_COMPUTE].queue->SetName(L"QUEUE_COMPUTE"));
 		}
@@ -2570,7 +2570,7 @@ std::mutex queue_locker;
 			if (FAILED(hr))
 			{
 				wilog_messagebox("ID3D12Device::CreateCommandQueue[QUEUE_COPY] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-				wi::platform::Exit();
+				wi::platform::ExitFatal();
 			}
 			dx12_check(queues[QUEUE_COPY].queue->SetName(L"QUEUE_COPY"));
 		}
@@ -2623,7 +2623,7 @@ std::mutex queue_locker;
 			if (FAILED(hr))
 			{
 				wilog_messagebox("ID3D12Device::CreateDescriptorHeap[CBV_SRV_UAV] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-				wi::platform::Exit();
+				wi::platform::ExitFatal();
 			}
 
 			descriptorheap_res.start_cpu = descriptorheap_res.heap_GPU->GetCPUDescriptorHandleForHeapStart();
@@ -2633,7 +2633,7 @@ std::mutex queue_locker;
 			if (FAILED(hr))
 			{
 				wilog_messagebox("ID3D12Device::CreateFence[CBV_SRV_UAV] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-				wi::platform::Exit();
+				wi::platform::ExitFatal();
 			}
 			dx12_check(descriptorheap_res.fence->SetName(L"DescriptorHeapGPU[CBV_SRV_UAV]::fence"));
 			descriptorheap_res.fenceValue = descriptorheap_res.fence->GetCompletedValue();
@@ -2655,7 +2655,7 @@ std::mutex queue_locker;
 			if (FAILED(hr))
 			{
 				wilog_messagebox("ID3D12Device::CreateDescriptorHeap[SAMPLER] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-				wi::platform::Exit();
+				wi::platform::ExitFatal();
 			}
 
 			descriptorheap_sam.start_cpu = descriptorheap_sam.heap_GPU->GetCPUDescriptorHandleForHeapStart();
@@ -2665,7 +2665,7 @@ std::mutex queue_locker;
 			if (FAILED(hr))
 			{
 				wilog_messagebox("ID3D12Device::CreateFence[SAMPLER] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-				wi::platform::Exit();
+				wi::platform::ExitFatal();
 			}
 			dx12_check(descriptorheap_sam.fence->SetName(L"DescriptorHeapGPU[SAMPLER]::fence"));
 			descriptorheap_sam.fenceValue = descriptorheap_sam.fence->GetCompletedValue();
@@ -2686,7 +2686,7 @@ std::mutex queue_locker;
 				if (FAILED(hr))
 				{
 					wilog_messagebox("ID3D12Device::CreateFence[FRAME] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-					wi::platform::Exit();
+					wi::platform::ExitFatal();
 				}
 				switch (queue)
 				{
@@ -2807,7 +2807,7 @@ std::mutex queue_locker;
 			}
 			error += "\nExiting.";
 			wilog_messagebox("%s", error.c_str());
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		if (features.ConservativeRasterizationTier() >= D3D12_CONSERVATIVE_RASTERIZATION_TIER_1)
@@ -2882,7 +2882,7 @@ std::mutex queue_locker;
 		if (features.HighestRootSignatureVersion() < D3D_ROOT_SIGNATURE_VERSION_1_1)
 		{
 			wilog_messagebox("DX12: Root signature version 1.1 not supported!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		// Fully typed casting: https://microsoft.github.io/DirectX-Specs/d3d/RelaxedCasting.html#casting-rules-for-rs2-drivers
@@ -2947,7 +2947,7 @@ std::mutex queue_locker;
 		if (FAILED(hr))
 		{
 			wilog_messagebox("ID3D12Device::CreateCommandSignature[dispatchIndirect] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		cmd_desc.ByteStride = sizeof(D3D12_DRAW_ARGUMENTS);
@@ -2957,7 +2957,7 @@ std::mutex queue_locker;
 		if (FAILED(hr))
 		{
 			wilog_messagebox("ID3D12Device::CreateCommandSignature[drawInstancedIndirect] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		cmd_desc.ByteStride = sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
@@ -2967,7 +2967,7 @@ std::mutex queue_locker;
 		if (FAILED(hr))
 		{
 			wilog_messagebox("ID3D12Device::CreateCommandSignature[drawIndexedInstancedIndirect] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		if (CheckCapability(GraphicsDeviceCapability::MESH_SHADER))

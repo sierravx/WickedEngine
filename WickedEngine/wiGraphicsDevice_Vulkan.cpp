@@ -2191,7 +2191,7 @@ using namespace vulkan_internal;
 		if (res != VK_SUCCESS)
 		{
 			wi::helper::messageBox("volkInitialize failed! ERROR: " + std::string(string_VkResult(res)), "Error!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		// Fill out application info:
@@ -2333,7 +2333,7 @@ using namespace vulkan_internal;
 			if (res != VK_SUCCESS)
 			{
 				wi::helper::messageBox("vkCreateInstance failed! ERROR: " + std::string(string_VkResult(res)), "Error!");
-				wi::platform::Exit();
+				wi::platform::ExitFatal();
 			}
 
 			volkLoadInstanceOnly(instance);
@@ -2351,7 +2351,7 @@ using namespace vulkan_internal;
 			if (deviceCount == 0)
 			{
 				wilog_messagebox("Failed to find GPU with Vulkan 1.3 support!");
-				wi::platform::Exit();
+				wi::platform::ExitFatal();
 			}
 
 			wi::vector<VkPhysicalDevice> devices(deviceCount);
@@ -2585,7 +2585,7 @@ using namespace vulkan_internal;
 			if (physicalDevice == VK_NULL_HANDLE)
 			{
 				wilog_messagebox("Failed to find a suitable GPU!");
-				wi::platform::Exit();
+				wi::platform::ExitFatal();
 			}
 
 			// This fills the properties and features again of the finally selected graphics card:
@@ -2959,7 +2959,7 @@ using namespace vulkan_internal;
 			if (res != VK_SUCCESS)
 			{
 				wi::helper::messageBox("vkCreateDevice failed! ERROR: " + std::string(string_VkResult(res)), "Error!");
-				wi::platform::Exit();
+				wi::platform::ExitFatal();
 			}
 
 			volkLoadDevice(device);
@@ -3044,7 +3044,7 @@ using namespace vulkan_internal;
 		if (res != VK_SUCCESS)
 		{
 			wi::helper::messageBox("vmaCreateAllocator failed! ERROR: " + std::string(string_VkResult(res)), "Error!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		std::vector<VkExternalMemoryHandleTypeFlags> externalMemoryHandleTypes;
@@ -3060,7 +3060,7 @@ using namespace vulkan_internal;
 		if (res != VK_SUCCESS)
 		{
 			wi::helper::messageBox("Failed to create Vulkan external memory allocator, ERROR: " + std::string(string_VkResult(res)), "Error!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 
 		copyAllocator.init(this);
@@ -3080,7 +3080,7 @@ using namespace vulkan_internal;
 				if (res != VK_SUCCESS)
 				{
 					wi::helper::messageBox("vkCreateFence[FRAME] failed! ERROR: " + std::string(string_VkResult(res)), "Error!");
-					wi::platform::Exit();
+					wi::platform::ExitFatal();
 				}
 				switch (queue)
 				{
@@ -3660,13 +3660,13 @@ using namespace vulkan_internal;
 			if (!SDL_Vulkan_CreateSurface(window, instance, &internal_state->surface))
 			{
 				wilog_messagebox("Error creating a vulkan surface with SDL_Vulkan_CreateSurface!");
-				wi::platform::Exit();
+				wi::platform::ExitFatal();
 			}
 #elif defined(SDL3)
 			if (!SDL_Vulkan_CreateSurface(window, instance, nullptr, &internal_state->surface))
 			{
 				wilog_messagebox("Error creating a vulkan surface with SDL_Vulkan_CreateSurface!");
-				wi::platform::Exit();
+				wi::platform::ExitFatal();
 			}
 #elif defined(__APPLE__)
 			wilog("Vulkan surface on Apple platform is not yet implemented");

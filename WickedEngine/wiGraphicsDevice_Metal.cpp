@@ -1617,12 +1617,12 @@ using namespace metal_internal;
 		if (device.get() == nullptr)
 		{
 			wilog_messagebox("Metal graphics device creation failed, exiting!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 		if (!device->supportsFamily(MTL::GPUFamilyMetal4))
 		{
 			wilog_messagebox("Metal 4 graphics is not supported by your system, exiting!");
-			wi::platform::Exit();
+			wi::platform::ExitFatal();
 		}
 		
 		adapterName = device->name()->cString(NS::UTF8StringEncoding);
