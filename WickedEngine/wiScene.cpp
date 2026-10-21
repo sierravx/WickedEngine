@@ -5099,25 +5099,17 @@ namespace wi::scene
 			UpdateOcclusionResult(light.occlusion);
 
 			XMMATRIX W = XMLoadFloat4x4(&transform.world);
-			XMVECTOR S, R, T;
-			wi::math::DecomposeTransform(&S, &R, &T, W);
 
-			// The direction is the Y axis of the matrix. With shear (a rotated light under a non-uniformly scaled parent),
-			//	the Y axis of the decomposed rotation can point elsewhere, then the rotation is turned to the direction:
-			const XMVECTOR D = XMVector3Normalize(XMVector3TransformNormal(XMVectorSet(0, 1, 0, 0), W));
-			const XMVECTOR Y = XMVector3Rotate(XMVectorSet(0, 1, 0, 0), R);
-			const XMVECTOR axis = XMVector3Cross(Y, D);
-			const float sin_angle = XMVectorGetX(XMVector3Length(axis));
-			if (sin_angle > 0.00001f)
-			{
-				const float angle = std::atan2(sin_angle, XMVectorGetX(XMVector3Dot(Y, D)));
-				R = XMQuaternionNormalize(XMQuaternionMultiply(R, XMQuaternionRotationNormal(axis / sin_angle, angle)));
-			}
+			// The rotation keeps the axis that the light direction is taken from below (Y for directional and spot lights,
+			//	Z for rectangle lights, X for point lights), so that it agrees with the direction even if the matrix has shear
+			//	(a rotated light under a non-uniformly scaled parent) or mirroring:
+			const int direction_axis = light.type == LightComponent::RECTANGLE ? 2 : (light.type == LightComponent::POINT ? 0 : 1);
+			XMVECTOR S, R, T;
+			wi::math::DecomposeTransform(&S, &R, &T, W, direction_axis);
 
 			XMStoreFloat3(&light.position, T);
 			XMStoreFloat4(&light.rotation, R);
 			XMStoreFloat3(&light.scale, S);
-			XMStoreFloat3(&light.direction, D);
 
 			switch (light.type)
 			{

@@ -1,5 +1,7 @@
 #include "wiMath.h"
 
+#include <cassert>
+
 namespace wi::math
 {
 	float TriangleArea(const XMVECTOR& A, const XMVECTOR& B, const XMVECTOR& C)
@@ -166,24 +168,83 @@ namespace wi::math
 		}
 	}
 
+	namespace
+	{
+		constexpr float decompose_epsilon = 0.0001f; // XM3_DECOMP_EPSILON
+
+		float AxisLength(const XMMATRIX& M, int axis)
+		{
+			return XMVectorGetX(XMVector3Length(M.r[axis]));
+		}
+
+		// Makes the closest scale * rotation of a matrix by orthonormalizing its axes: axis a keeps its direction,
+		//	axis b is made perpendicular to it and axis c is their cross product, pointing to the same side as the original axis c.
+		//	If the matrix is mirrored, the mirroring is carried by the axis given as mirror (its scale is negative).
+		void DecomposeOrthonormalized(XMVECTOR* outScale, XMVECTOR* outRotQuat, XMVECTOR* outTrans, const XMMATRIX& M, int a, int b, int c, int mirror)
+		{
+			const XMVECTOR canonical[3] = { g_XMIdentityR0, g_XMIdentityR1, g_XMIdentityR2 };
+
+			XMVECTOR axis[3] = { M.r[0], M.r[1], M.r[2] };
+			float scale[3] = { AxisLength(M, 0), AxisLength(M, 1), AxisLength(M, 2) };
+
+			// Axis a keeps its direction:
+			if (scale[a] < decompose_epsilon)
+			{
+				axis[a] = canonical[a];
+			}
+			axis[a] = XMVector3Normalize(axis[a]);
+
+			// Axis b is made perpendicular to it:
+			if (scale[b] >= decompose_epsilon)
+			{
+				axis[b] = XMVector3Normalize(axis[b]);
+				axis[b] = axis[b] - XMVector3Dot(axis[b], axis[a]) * axis[a];
+			}
+			if (scale[b] < decompose_epsilon || XMVectorGetX(XMVector3Length(axis[b])) < decompose_epsilon)
+			{
+				// Zero length, or parallel to axis a: take a perpendicular direction like XMMatrixDecompose() does
+				const float absX = std::abs(XMVectorGetX(axis[a]));
+				const float absY = std::abs(XMVectorGetY(axis[a]));
+				const float absZ = std::abs(XMVectorGetZ(axis[a]));
+				const int smallest = absX <= absY && absX <= absZ ? 0 : (absY <= absZ ? 1 : 2);
+				axis[b] = XMVector3Cross(axis[a], canonical[smallest]);
+			}
+			axis[b] = XMVector3Normalize(axis[b]);
+
+			// Axis c is their cross product, pointing to the same side as the original axis:
+			axis[c] = XMVector3Normalize(XMVector3Cross(axis[a], axis[b]));
+			if (scale[c] >= decompose_epsilon && XMVectorGetX(XMVector3Dot(axis[c], M.r[c])) < 0)
+			{
+				axis[c] = XMVectorNegate(axis[c]);
+			}
+
+			XMMATRIX basis;
+			basis.r[0] = XMVectorSetW(axis[0], 0);
+			basis.r[1] = XMVectorSetW(axis[1], 0);
+			basis.r[2] = XMVectorSetW(axis[2], 0);
+			basis.r[3] = g_XMIdentityR3;
+
+			if (XMVectorGetX(XMMatrixDeterminant(basis)) < 0)
+			{
+				scale[mirror] = -scale[mirror];
+				basis.r[mirror] = XMVectorNegate(basis.r[mirror]);
+			}
+
+			*outScale = XMVectorSet(scale[0], scale[1], scale[2], 0);
+			*outRotQuat = XMQuaternionRotationMatrix(basis);
+			*outTrans = M.r[3];
+		}
+	}
+
 	void DecomposeTransform(XMVECTOR* outScale, XMVECTOR* outRotQuat, XMVECTOR* outTrans, const XMMATRIX& M)
 	{
 		if (XMMatrixDecompose(outScale, outRotQuat, outTrans, M))
 			return;
 
 		// The matrix has shear, XMMatrixDecompose() refused it and didn't write the rotation.
-		//	The axes are orthonormalized here with the same conventions that XMMatrixDecompose() uses:
-		constexpr float epsilon = 0.0001f; // XM3_DECOMP_EPSILON
-		const XMVECTOR canonical[3] = { g_XMIdentityR0, g_XMIdentityR1, g_XMIdentityR2 };
-
-		XMVECTOR axis[3] = { M.r[0], M.r[1], M.r[2] };
-		float scale[3] = {
-			XMVectorGetX(XMVector3Length(axis[0])),
-			XMVectorGetX(XMVector3Length(axis[1])),
-			XMVectorGetX(XMVector3Length(axis[2])),
-		};
-
-		// a: longest axis, b: middle axis, c: shortest axis
+		//	The axes are orthonormalized with the same conventions that XMMatrixDecompose() uses: the longest axis keeps
+		//	its direction and carries the mirroring, the middle one is made perpendicular, the shortest one is their cross product.
+		const float scale[3] = { AxisLength(M, 0), AxisLength(M, 1), AxisLength(M, 2) };
 		int a = 0, b = 1, c = 2;
 		if (scale[a] < scale[b])
 			std::swap(a, b);
@@ -191,54 +252,28 @@ namespace wi::math
 			std::swap(b, c);
 		if (scale[a] < scale[b])
 			std::swap(a, b);
+		DecomposeOrthonormalized(outScale, outRotQuat, outTrans, M, a, b, c, a);
+	}
 
-		// The longest axis keeps its direction:
-		if (scale[a] < epsilon)
-		{
-			axis[a] = canonical[a];
-		}
-		axis[a] = XMVector3Normalize(axis[a]);
+	void DecomposeTransform(XMVECTOR* outScale, XMVECTOR* outRotQuat, XMVECTOR* outTrans, const XMMATRIX& M, int keepAxis)
+	{
+		assert(keepAxis >= 0 && keepAxis < 3);
+		const XMVECTOR canonical[3] = { g_XMIdentityR0, g_XMIdentityR1, g_XMIdentityR2 };
 
-		// The middle axis is made perpendicular to it:
-		if (scale[b] >= epsilon)
+		if (XMMatrixDecompose(outScale, outRotQuat, outTrans, M))
 		{
-			axis[b] = XMVector3Normalize(axis[b]);
-			axis[b] = axis[b] - XMVector3Dot(axis[b], axis[a]) * axis[a];
-		}
-		if (scale[b] < epsilon || XMVectorGetX(XMVector3Length(axis[b])) < epsilon)
-		{
-			// Zero length, or parallel to the longest axis: take a perpendicular direction like XMMatrixDecompose() does
-			const float absX = std::abs(XMVectorGetX(axis[a]));
-			const float absY = std::abs(XMVectorGetY(axis[a]));
-			const float absZ = std::abs(XMVectorGetZ(axis[a]));
-			const int smallest = absX <= absY && absX <= absZ ? 0 : (absY <= absZ ? 1 : 2);
-			axis[b] = XMVector3Cross(axis[a], canonical[smallest]);
-		}
-		axis[b] = XMVector3Normalize(axis[b]);
-
-		// The shortest axis is their cross product, pointing to the same side as the original axis:
-		axis[c] = XMVector3Normalize(XMVector3Cross(axis[a], axis[b]));
-		if (scale[c] >= epsilon && XMVectorGetX(XMVector3Dot(axis[c], M.r[c])) < 0)
-		{
-			axis[c] = XMVectorNegate(axis[c]);
+			// Without shear, and when the mirroring (if any) is carried by an other axis, the kept axis already points along the matrix's axis:
+			const XMVECTOR rotated = XMVector3Rotate(canonical[keepAxis], *outRotQuat);
+			if (XMVectorGetX(XMVector3Dot(rotated, XMVector3Normalize(M.r[keepAxis]))) > 0.999999f)
+				return;
 		}
 
-		XMMATRIX basis;
-		basis.r[0] = XMVectorSetW(axis[0], 0);
-		basis.r[1] = XMVectorSetW(axis[1], 0);
-		basis.r[2] = XMVectorSetW(axis[2], 0);
-		basis.r[3] = g_XMIdentityR3;
-
-		// Mirroring is carried by the longest axis:
-		if (XMVectorGetX(XMMatrixDeterminant(basis)) < 0)
-		{
-			scale[a] = -scale[a];
-			basis.r[a] = XMVectorNegate(basis.r[a]);
-		}
-
-		*outScale = XMVectorSet(scale[0], scale[1], scale[2], 0);
-		*outRotQuat = XMQuaternionRotationMatrix(basis);
-		*outTrans = M.r[3];
+		// The kept axis keeps its direction, the longer one of the other two axes is made perpendicular to it and carries the mirroring:
+		int b = (keepAxis + 1) % 3;
+		int c = (keepAxis + 2) % 3;
+		if (AxisLength(M, b) < AxisLength(M, c))
+			std::swap(b, c);
+		DecomposeOrthonormalized(outScale, outRotQuat, outTrans, M, keepAxis, b, c, b);
 	}
 
 	const XMFLOAT4& GetHaltonSequence(int idx)

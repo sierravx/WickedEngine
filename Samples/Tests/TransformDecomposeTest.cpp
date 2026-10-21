@@ -219,27 +219,116 @@ namespace
 		}
 	}
 
+	void TestKeepAxis()
+	{
+		const XMVECTOR canonical[3] = { XMVectorSet(1, 0, 0, 0), XMVectorSet(0, 1, 0, 0), XMVectorSet(0, 0, 1, 0) };
+		XMVECTOR S, R, T;
+
+		// Random sheared and mirrored matrices: the kept axis points exactly along the matrix's axis
+		wi::random::RNG rng(11);
+		for (int i = 0; i < 1000; ++i)
+		{
+			XMMATRIX M = XMMatrixIdentity();
+			for (int k = 0; k < 3; ++k)
+			{
+				M.r[k] = XMVectorSet(rng.next_float(-2, 2), rng.next_float(-2, 2), rng.next_float(-2, 2), 0);
+			}
+			M.r[3] = XMVectorSet(rng.next_float(-10, 10), rng.next_float(-10, 10), rng.next_float(-10, 10), 1);
+			if (std::abs(XMVectorGetX(XMMatrixDeterminant(M))) < 0.01f)
+				continue;
+			for (int keepAxis = 0; keepAxis < 3; ++keepAxis)
+			{
+				wi::math::DecomposeTransform(&S, &R, &T, M, keepAxis);
+				const XMMATRIX rebuilt = Compose(S, R, T);
+				bool lengths_kept = true;
+				for (int k = 0; k < 3; ++k)
+				{
+					lengths_kept &= std::abs(XMVectorGetX(XMVector3Length(rebuilt.r[k]) - XMVector3Length(M.r[k]))) < 1e-4f;
+				}
+				const bool ok =
+					IsUnitQuaternion(R) &&
+					XMVectorGetX(XMVector3Length(XMVector3Rotate(canonical[keepAxis], R) - XMVector3Normalize(M.r[keepAxis]))) < 1e-4f &&
+					XMVectorGetX(XMMatrixDeterminant(rebuilt)) * XMVectorGetX(XMMatrixDeterminant(M)) > 0 &&
+					lengths_kept &&
+					XMVector4Equal(T, M.r[3]);
+				if (!ok)
+				{
+					Check(false, "DecomposeTransform() with a kept axis did not keep the axis of a sheared or mirrored matrix");
+					return;
+				}
+			}
+		}
+
+		// Without shear and mirroring, the result is the one of XMMatrixDecompose()
+		const XMMATRIX M = XMMatrixScaling(2, 3, 4) * XMMatrixRotationRollPitchYaw(0.3f, 1.2f, -0.7f) * XMMatrixTranslation(1, 2, 3);
+		XMVECTOR expectedS, expectedR, expectedT;
+		XMMatrixDecompose(&expectedS, &expectedR, &expectedT, M);
+		for (int keepAxis = 0; keepAxis < 3; ++keepAxis)
+		{
+			wi::math::DecomposeTransform(&S, &R, &T, M, keepAxis);
+			Check(XMVector4Equal(S, expectedS) && XMVector4Equal(R, expectedR) && XMVector4Equal(T, expectedT), "DecomposeTransform() with a kept axis changed the result of a matrix without shear");
+		}
+	}
+
 	void TestLight()
 	{
-		// Turned about Y the light's Y axis stays the shortest axis; turned about Z its X axis becomes the longest and Y is not perpendicular to it
-		for (const XMFLOAT3& rollPitchYaw : { XMFLOAT3(0, 45, 0), XMFLOAT3(0, 0, 40) })
+		struct LightType
 		{
+			LightComponent::LightType type;
+			const char* name;
+			XMVECTOR axis; // the light direction in the light's local space
+		};
+		const LightType types[] = {
+			{ LightComponent::DIRECTIONAL, "directional", XMVectorSet(0, 1, 0, 0) },
+			{ LightComponent::SPOT, "spot", XMVectorSet(0, 1, 0, 0) },
+			{ LightComponent::POINT, "point", XMVectorSet(1, 0, 0, 0) },
+			{ LightComponent::RECTANGLE, "rectangle", XMVectorSet(0, 0, -1, 0) },
+		};
+		// Non-uniform scales stretching each axis, and mirrored ones
+		const XMFLOAT3 parent_scales[] = { XMFLOAT3(2, 1, 1), XMFLOAT3(1, 2, 1), XMFLOAT3(1, 1, 2), XMFLOAT3(-1, 1, 1), XMFLOAT3(-1, 2, 1) };
+
+		for (const LightType& type : types)
+		{
+			for (const XMFLOAT3& parent_scale : parent_scales)
+			{
+				bool ok = true;
+				for (int pitch = 0; pitch < 360 && ok; pitch += 30)
+				{
+					for (int roll = 0; roll < 360 && ok; roll += 30)
+					{
+						Scene scene;
+						Entity parent = CreateNode(scene, parent_scale, XMFLOAT3(0, 10, 0), XMFLOAT3(0, 0, 0));
+						Entity entity = CreateNode(scene, XMFLOAT3(1, 1, 1), XMFLOAT3(float(pitch), 20, float(roll)), XMFLOAT3(0, 3, 0));
+						scene.lights.Create(entity).SetType(type.type);
+						scene.Component_Attach(entity, parent, true);
+						UpdateWorldMatrices(scene);
+
+						wi::jobsystem::context ctx;
+						scene.RunLightUpdateSystem(ctx);
+						wi::jobsystem::Wait(ctx);
+						const LightComponent& light = *scene.lights.GetComponent(entity);
+
+						// The rotation orients the shadow cameras and the light in the shaders, the direction is where it shines, they must agree:
+						const XMVECTOR rotated = XMVector3Rotate(type.axis, XMLoadFloat4(&light.rotation));
+						ok = IsUnitQuaternion(light.rotation) && XMVectorGetX(XMVector3Length(rotated - XMLoadFloat3(&light.direction))) < 1e-4f;
+					}
+				}
+				Check(ok, std::string("the rotation of a ") + type.name + " light under a non-uniformly scaled or mirrored parent does not point to the light direction");
+			}
+
+			// A light without shear and mirroring gets the rotation of XMMatrixDecompose()
 			Scene scene;
-			Entity parent = CreateNode(scene, XMFLOAT3(2, 1, 1), XMFLOAT3(0, 10, 0), XMFLOAT3(0, 0, 0));
-			Entity entity = CreateNode(scene, XMFLOAT3(1, 1, 1), rollPitchYaw, XMFLOAT3(0, 3, 0));
-			scene.lights.Create(entity).SetType(LightComponent::SPOT);
+			Entity parent = CreateNode(scene, XMFLOAT3(2, 2, 2), XMFLOAT3(0, 10, 0), XMFLOAT3(0, 0, 0));
+			Entity entity = CreateNode(scene, XMFLOAT3(1, 1, 1), XMFLOAT3(30, 20, 40), XMFLOAT3(0, 3, 0));
+			scene.lights.Create(entity).SetType(type.type);
 			scene.Component_Attach(entity, parent, true);
 			UpdateWorldMatrices(scene);
-
 			wi::jobsystem::context ctx;
 			scene.RunLightUpdateSystem(ctx);
 			wi::jobsystem::Wait(ctx);
-			const LightComponent& light = *scene.lights.GetComponent(entity);
-			Check(IsUnitQuaternion(light.rotation), "the rotation of a light under non-uniform scale is not a unit quaternion");
-
-			// The rotation orients the shadow cameras, the direction the light itself, they must agree:
-			const XMVECTOR rotated_up = XMVector3Rotate(XMVectorSet(0, 1, 0, 0), XMLoadFloat4(&light.rotation));
-			Check(XMVectorGetX(XMVector3Length(rotated_up - XMLoadFloat3(&light.direction))) < 1e-4f, "the rotation of a light under non-uniform scale does not point to the light direction");
+			XMVECTOR S, R, T;
+			XMMatrixDecompose(&S, &R, &T, XMLoadFloat4x4(&scene.transforms.GetComponent(entity)->world));
+			Check(XMVector4Equal(XMLoadFloat4(&scene.lights.GetComponent(entity)->rotation), R), std::string("the rotation of a ") + type.name + " light without shear changed");
 		}
 	}
 
@@ -292,6 +381,7 @@ int main()
 	TestDecomposableMatrices();
 	TestShearedMatrices();
 	TestDegenerateMatrices();
+	TestKeepAxis();
 	TestTransformComponent();
 	TestLight();
 	TestNonFiniteBone();

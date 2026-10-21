@@ -441,6 +441,11 @@ namespace wi::math
 	//	is made perpendicular to it and the shortest one is their cross product.
 	//	All outputs are always written, and for a finite matrix the rotation is always a unit quaternion.
 	void DecomposeTransform(XMVECTOR* outScale, XMVECTOR* outRotQuat, XMVECTOR* outTrans, const XMMATRIX& M);
+	// Like DecomposeTransform() above, but the rotated keepAxis (0: X, 1: Y, 2: Z) always points exactly along that axis of the matrix,
+	//	also with shear or mirroring: the shear is dropped from the other axes and the mirroring is carried by one of them.
+	//	Use it when one of the axes has a meaning, like the direction of a light.
+	//	Without shear, when the mirroring (if any) is already carried by an other axis, the result of XMMatrixDecompose() is returned unchanged.
+	void DecomposeTransform(XMVECTOR* outScale, XMVECTOR* outRotQuat, XMVECTOR* outTrans, const XMMATRIX& M, int keepAxis);
 
 	inline XMFLOAT3 GetPosition(const XMFLOAT4X4& _m)
 	{
