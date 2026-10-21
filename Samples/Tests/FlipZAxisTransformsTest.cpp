@@ -77,6 +77,7 @@ namespace
 	{
 		const std::string variant = halfTurnRoot ? " (root turned half about Y)" : "";
 
+		Scene other_scene; // the source of an animation retargeted from an other scene
 		Scene scene;
 		Entity root = CreateNode(scene, XMFLOAT3(1, 1, 1), XMFLOAT3(0, halfTurnRoot ? 180.0f : 0.0f, 0), XMFLOAT3(0, 0, 0));
 		Entity bones[3] = {
@@ -109,6 +110,10 @@ namespace
 		const wi::vector<float> translation_keys = { 1, 2, 3, 4, 5, 6 };
 		const wi::vector<float> rotation_keys = { 0.1f, 0.2f, 0.3f, 0.9f, 0.4f, 0.5f, 0.6f, 0.5f };
 		const wi::vector<float> scale_keys = { 1, 2, 3, 4, 5, 6 };
+		const wi::vector<float> shared_keys = { 1, 1, 1, 2, 2, 2 };
+		XMFLOAT4X4 retarget_dst, retarget_src;
+		XMStoreFloat4x4(&retarget_dst, XMMatrixRotationRollPitchYaw(0.3f, 0.5f, 0.7f) * XMMatrixTranslation(1, 2, 3));
+		XMStoreFloat4x4(&retarget_src, XMMatrixScaling(1, 2, 1) * XMMatrixRotationRollPitchYaw(-0.2f, 0.4f, 0.1f) * XMMatrixTranslation(-1, 0, 2));
 		const AnimationComponent::AnimationChannel::Path paths[] = {
 			AnimationComponent::AnimationChannel::Path::TRANSLATION,
 			AnimationComponent::AnimationChannel::Path::ROTATION,
@@ -143,8 +148,51 @@ namespace
 			channel.path = AnimationComponent::AnimationChannel::Path::TRANSLATION;
 			AnimationComponent::AnimationChannel& invalid = animation.channels.emplace_back();
 			invalid.target = bones[1];
-			invalid.samplerIndex = int(animation.samplers.size());
+			invalid.samplerIndex = 1000; // (not the sampler count, more samplers are added below)
 			invalid.path = AnimationComponent::AnimationChannel::Path::ROTATION;
+		}
+		Entity sharedDataEntity = INVALID_ENTITY;
+		const size_t shared_channel_index = animation.channels.size(); // then the retargeted channels follow
+		{
+			// A sampler used by a translation and a scale channel (allowed in glTF): only the translation may be mirrored
+			sharedDataEntity = CreateAnimationData(scene, animationEntity, shared_keys);
+			AnimationComponent::AnimationSampler& sampler = animation.samplers.emplace_back();
+			sampler.data = sharedDataEntity;
+			const int samplerIndex = int(animation.samplers.size() - 1);
+			AnimationComponent::AnimationChannel& translation = animation.channels.emplace_back();
+			translation.target = bones[0];
+			translation.samplerIndex = samplerIndex;
+			translation.path = AnimationComponent::AnimationChannel::Path::TRANSLATION;
+			AnimationComponent::AnimationChannel& scale = animation.channels.emplace_back();
+			scale.target = bones[0];
+			scale.samplerIndex = samplerIndex;
+			scale.path = AnimationComponent::AnimationChannel::Path::SCALE;
+		}
+		{
+			// Channels retargeted without baking, from a source in this scene and from a source in an other scene
+			AnimationComponent::RetargetSourceData& same = animation.retargets.emplace_back();
+			same.source = bones[0];
+			same.dstRelativeMatrix = retarget_dst;
+			same.srcRelativeParentMatrix = retarget_src;
+			AnimationComponent::AnimationChannel& same_channel = animation.channels.emplace_back();
+			same_channel.target = bones[2];
+			same_channel.samplerIndex = 0;
+			same_channel.retargetIndex = 0;
+			same_channel.path = AnimationComponent::AnimationChannel::Path::TRANSLATION;
+
+			AnimationComponent::RetargetSourceData& from_other = animation.retargets.emplace_back();
+			from_other.source = CreateNode(other_scene, XMFLOAT3(1, 1, 1), XMFLOAT3(0, 0, 0), XMFLOAT3(0, 0, 0));
+			from_other.dstRelativeMatrix = retarget_dst;
+			from_other.srcRelativeParentMatrix = retarget_src;
+			AnimationComponent::AnimationSampler& other_sampler = animation.samplers.emplace_back();
+			other_sampler.data = CreateEntity();
+			other_scene.animation_datas.Create(other_sampler.data).keyframe_data = translation_keys;
+			other_sampler.scene = &other_scene;
+			AnimationComponent::AnimationChannel& other_channel = animation.channels.emplace_back();
+			other_channel.target = bones[1];
+			other_channel.samplerIndex = int(animation.samplers.size() - 1);
+			other_channel.retargetIndex = 1;
+			other_channel.path = AnimationComponent::AnimationChannel::Path::TRANSLATION;
 		}
 		{
 			// (created last, because creating an other animation can move the one referenced above)
@@ -204,6 +252,27 @@ namespace
 		Check(rotation_flipped == wi::vector<float>({ -0.1f, -0.2f, 0.3f, 0.9f, -0.4f, -0.5f, 0.6f, 0.5f }), "rotation keys were not mirrored" + variant);
 		Check(scale_flipped == scale_keys, "scale keys were changed" + variant);
 
+		const AnimationComponent& flipped_animation = *scene.animations.GetComponent(animationEntity);
+		{
+			// The shared data stays with the translation and is mirrored, the scale channel has an unchanged copy
+			const AnimationComponent::AnimationChannel& translation = flipped_animation.channels[shared_channel_index];
+			const AnimationComponent::AnimationChannel& scale = flipped_animation.channels[shared_channel_index + 1];
+			const Entity translationData = flipped_animation.samplers[translation.samplerIndex].data;
+			const Entity scaleData = flipped_animation.samplers[scale.samplerIndex].data;
+			Check(translationData == sharedDataEntity && scene.animation_datas.GetComponent(translationData)->keyframe_data == wi::vector<float>({ 1, 1, -1, 2, 2, -2 }), "data shared by a translation and a scale channel was not mirrored for the translation" + variant);
+			Check(scaleData != sharedDataEntity && scene.animation_datas.Contains(scaleData) && scene.animation_datas.GetComponent(scaleData)->keyframe_data == shared_keys, "data shared by a translation and a scale channel was mirrored for the scale" + variant);
+		}
+		{
+			const XMMATRIX F = XMMatrixScaling(1, 1, -1);
+			const XMMATRIX dst = XMLoadFloat4x4(&retarget_dst);
+			const XMMATRIX src = XMLoadFloat4x4(&retarget_src);
+			const AnimationComponent::RetargetSourceData& same = flipped_animation.retargets[0];
+			const AnimationComponent::RetargetSourceData& from_other = flipped_animation.retargets[1];
+			Check(MaxDifference(XMLoadFloat4x4(&same.dstRelativeMatrix), F * dst * F) == 0 && MaxDifference(XMLoadFloat4x4(&same.srcRelativeParentMatrix), F * src * F) == 0, "the matrices of a retarget from this scene were not mirrored" + variant);
+			Check(MaxDifference(XMLoadFloat4x4(&from_other.dstRelativeMatrix), F * dst) == 0 && MaxDifference(XMLoadFloat4x4(&from_other.srcRelativeParentMatrix), src * F) == 0, "the matrices of a retarget from an other scene were not mirrored" + variant);
+			Check(other_scene.animation_datas.GetComponent(flipped_animation.samplers[flipped_animation.channels[shared_channel_index + 3].samplerIndex].data)->keyframe_data == translation_keys, "the keys of an other scene were changed" + variant);
+		}
+
 		// Flipping back restores the original state exactly (this is how the glTF export restores the scene)
 		FlipZAxisTransforms(scene, root);
 		bool restored = scene.transforms.GetCount() == transforms_original.size();
@@ -219,6 +288,11 @@ namespace
 		Check(restored, "flipping back did not restore the transforms" + variant);
 		Check(std::memcmp(flipped.inverseBindMatrices.data(), binds_original.data(), binds_original.size() * sizeof(XMFLOAT4X4)) == 0, "flipping back did not restore the inverse bind matrices" + variant);
 		Check(translation_flipped == translation_keys && rotation_flipped == rotation_keys && scale_flipped == scale_keys, "flipping back did not restore the animation keys" + variant);
+		Check(scene.animation_datas.GetComponent(sharedDataEntity)->keyframe_data == shared_keys, "flipping back did not restore shared data" + variant);
+		const AnimationComponent& restored_animation = *scene.animations.GetComponent(animationEntity);
+		Check(std::memcmp(&restored_animation.retargets[0].dstRelativeMatrix, &retarget_dst, sizeof(XMFLOAT4X4)) == 0 && std::memcmp(&restored_animation.retargets[0].srcRelativeParentMatrix, &retarget_src, sizeof(XMFLOAT4X4)) == 0 &&
+			std::memcmp(&restored_animation.retargets[1].dstRelativeMatrix, &retarget_dst, sizeof(XMFLOAT4X4)) == 0 && std::memcmp(&restored_animation.retargets[1].srcRelativeParentMatrix, &retarget_src, sizeof(XMFLOAT4X4)) == 0,
+			"flipping back did not restore the retarget matrices" + variant);
 	}
 }
 
