@@ -5413,7 +5413,8 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				wi::vector<int> nodes;
 				for (int node : exported.nodes)
 				{
-					if (last_channels[std::make_pair(node, channel.path)] == channel_index)
+					auto last = last_channels.find(std::make_pair(node, channel.path));
+					if (last != last_channels.end() && last->second == channel_index)
 					{
 						nodes.push_back(node);
 					}
@@ -5462,7 +5463,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 			if (animation_builder.channels.empty())
 				continue; // a glTF animation must have channels
-			state.gltfModel.animations.push_back(animation_builder);
+			state.gltfModel.animations.push_back(std::move(animation_builder));
 		}
 
 		if (!buffer_builder.data.empty())

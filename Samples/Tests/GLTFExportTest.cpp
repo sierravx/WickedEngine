@@ -32,6 +32,17 @@ namespace
 	constexpr int TEST_FAILED = 2;
 	const char* output_file = "GLTFExportTest_output.gltf";
 
+	// Removes the output of the export: the file and its buffers (tinygltf names them after the file, numbered after the first one)
+	void RemoveOutputFiles()
+	{
+		std::remove(output_file);
+		std::remove("GLTFExportTest_output.bin");
+		for (int i = 0; i < 64; ++i)
+		{
+			std::remove(("GLTFExportTest_output" + std::to_string(i) + ".bin").c_str());
+		}
+	}
+
 	int failures = 0;
 
 	void Check(bool condition, const std::string& message)
@@ -125,10 +136,10 @@ namespace
 	{
 		return XMVectorMultiply(Q, XMVectorSet(-1, -1, 1, 1));
 	}
-	// The same rotation, as either of its two quaternions
+	// The same rotation, as either of its two quaternions (the distance is about half the angle between the rotations)
 	bool SameRotation(XMVECTOR q0, XMVECTOR q1, float tolerance = 1e-4f)
 	{
-		return std::abs(std::abs(XMVectorGetX(XMVector4Dot(q0, q1))) - 1) < tolerance;
+		return std::min(XMVectorGetX(XMVector4Length(q0 - q1)), XMVectorGetX(XMVector4Length(q0 + q1))) < tolerance;
 	}
 
 	wi::vector<float> ReadAccessor(const tinygltf::Model& model, int accessor_index)
@@ -147,11 +158,12 @@ namespace
 	{
 		const XMVECTOR qa = XMQuaternionRotationRollPitchYaw(0.2f, 0.4f, 0.1f);
 		const XMVECTOR qb = XMQuaternionRotationRollPitchYaw(-0.3f, 0.1f, 0.5f);
-		float buffer[10] = { 0, 1 };
+		float buffer[10] = { 0, 1 }; // two key times and two rotations
+		static_assert(sizeof(buffer) == 40, "the byteLength and buffer views in the file below");
 		XMStoreFloat4((XMFLOAT4*)&buffer[2], qa);
 		XMStoreFloat4((XMFLOAT4*)&buffer[6], qb);
 		const char* shared_file = "GLTFImportTest_shared.gltf";
-		const char* shared_bin = "GLTFImportTest_shared.bin";
+		const char* shared_bin = "GLTFImportTest_shared.bin"; // the uri in the file below
 		bool written = false;
 		if (FILE* bin = fopen(shared_bin, "wb"))
 		{
@@ -239,7 +251,7 @@ namespace
 
 		CheckSharedSamplerImport();
 
-		std::remove(output_file); // a file of an earlier run must not be checked
+		RemoveOutputFiles(); // the files of an earlier run must not be checked
 
 		Scene other; // the source of animations retargeted from an other scene
 		Scene scene;
@@ -443,19 +455,13 @@ namespace
 		if (!loader.LoadASCIIFromFile(&model, &err, &warn, output_file))
 		{
 			Check(false, "the exported file could not be loaded: " + err);
+			RemoveOutputFiles();
 			return TEST_FAILED;
 		}
 		// Importing the file back gives the keys of the scene (in the engine space)
 		Scene imported;
 		ImportModel_GLTF(output_file, imported);
-		std::remove(output_file);
-		for (const tinygltf::Buffer& buffer : model.buffers)
-		{
-			if (!buffer.uri.empty())
-			{
-				std::remove(buffer.uri.c_str());
-			}
-		}
+		RemoveOutputFiles();
 		auto imported_keys = [&](const std::string& name, Path path) {
 			const Entity target = imported.Entity_FindByName(name);
 			for (size_t i = 0; i < imported.animations.GetCount(); ++i)
@@ -695,11 +701,11 @@ int main(int argc, char** argv)
 	}
 	if (WIFSIGNALED(status))
 	{
-		std::cerr << "GLTFExport test failed: the export crashed with signal " << WTERMSIG(status) << '\n';
+		std::cerr << "GLTFExport test failed: the test process (import or export) crashed with signal " << WTERMSIG(status) << '\n';
 	}
 	else if (WIFEXITED(status) && WEXITSTATUS(status) == EXIT_FAILURE)
 	{
-		std::cerr << "GLTFExport test failed: the export ended the process with EXIT_FAILURE\n";
+		std::cerr << "GLTFExport test failed: the test process (import or export) ended with EXIT_FAILURE\n";
 	}
 	return 1;
 }
