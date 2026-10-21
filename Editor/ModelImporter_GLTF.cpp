@@ -1767,6 +1767,68 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 		lightIndex++;
 	}
 
+	// The rotation keys of light nodes get the same rotation as the lights above (the exporter undoes it). It is a constant
+	//	rotation multiplied with every key, which also applies to the tangents of cubic spline keys. Data that other channels
+	//	use too gets a copy for the light channels first.
+	{
+		const XMVECTOR light_rotation = XMQuaternionRotationRollPitchYaw(XM_PIDIV2, 0, 0);
+		auto light_rotation_channel = [&](const AnimationComponent::AnimationChannel& channel) {
+			return channel.path == AnimationComponent::AnimationChannel::Path::ROTATION && scene.lights.Contains(channel.target);
+		};
+		wi::unordered_map<Entity, uint32_t> data_users; // data -> 1: light rotation channels use it, 2: other channels use it
+		for (size_t i = 0; i < scene.animations.GetCount(); ++i)
+		{
+			const AnimationComponent& animation = scene.animations[i];
+			for (const AnimationComponent::AnimationChannel& channel : animation.channels)
+			{
+				if (channel.samplerIndex >= 0 && channel.samplerIndex < (int)animation.samplers.size())
+				{
+					data_users[animation.samplers[channel.samplerIndex].data] |= light_rotation_channel(channel) ? 1u : 2u;
+				}
+			}
+		}
+		wi::unordered_set<Entity> rotated_datas;
+		for (size_t i = 0; i < scene.animations.GetCount(); ++i)
+		{
+			AnimationComponent& animation = scene.animations[i];
+			wi::unordered_map<int, int> copied_samplers; // sampler index -> sampler of the copied data
+			for (AnimationComponent::AnimationChannel& channel : animation.channels)
+			{
+				if (!light_rotation_channel(channel) || channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
+					continue;
+				const Entity dataEntity = animation.samplers[channel.samplerIndex].data;
+				if (!scene.animation_datas.Contains(dataEntity))
+					continue;
+				if ((data_users[dataEntity] & 2u) != 0)
+				{
+					auto copied = copied_samplers.find(channel.samplerIndex);
+					if (copied == copied_samplers.end())
+					{
+						const AnimationDataComponent copy = *scene.animation_datas.GetComponent(dataEntity);
+						const Entity copyEntity = CreateEntity();
+						scene.animation_datas.Create(copyEntity) = copy;
+						scene.Component_Attach(copyEntity, scene.animations.GetEntity(i));
+						AnimationComponent::AnimationSampler sampler = animation.samplers[channel.samplerIndex];
+						sampler.data = copyEntity;
+						animation.samplers.push_back(sampler);
+						copied = copied_samplers.insert({ channel.samplerIndex, int(animation.samplers.size() - 1) }).first;
+					}
+					channel.samplerIndex = copied->second;
+				}
+
+				const Entity rotatedEntity = animation.samplers[channel.samplerIndex].data;
+				if (rotated_datas.insert(rotatedEntity).second)
+				{
+					wi::vector<float>& keys = scene.animation_datas.GetComponent(rotatedEntity)->keyframe_data;
+					for (size_t k = 0; k + 4 <= keys.size(); k += 4)
+					{
+						XMStoreFloat4((XMFLOAT4*)&keys[k], XMQuaternionMultiply(light_rotation, XMLoadFloat4((const XMFLOAT4*)&keys[k])));
+					}
+				}
+			}
+		}
+	}
+
 	int cameraIndex = 0;
 	for (auto& x : state.gltfModel.cameras)
 	{
@@ -4954,9 +5016,8 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 		if(wiscene.lights.Contains(transformEntity))
 		{
-			tinygltf::Value::Object node_light_extension_builder;
-			node_light_extension_builder["light"] = tinygltf::Value(int(wiscene.lights.GetIndex(transformEntity)));
-			node_builder.extensions["KHR_lights_punctual"] = tinygltf::Value(node_light_extension_builder);
+			// tinygltf writes the node's KHR_lights_punctual extension from node.light (and removes it from the extensions without that)
+			node_builder.light = int(wiscene.lights.GetIndex(transformEntity));
 		}
 
 		if(wiscene.cameras.Contains(transformEntity))
