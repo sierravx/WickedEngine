@@ -2981,7 +2981,12 @@ std::mutex queue_locker;
 #endif // PLATFORM_XBOX
 			cmd_desc.NumArgumentDescs = 1;
 			cmd_desc.pArgumentDescs = dispatchMeshArgs;
-			dx12_check(device->CreateCommandSignature(&cmd_desc, nullptr, PPV_ARGS(dispatchMeshIndirectCommandSignature)));
+			hr = dx12_check(device->CreateCommandSignature(&cmd_desc, nullptr, PPV_ARGS(dispatchMeshIndirectCommandSignature)));
+			if (FAILED(hr))
+			{
+				wilog_messagebox("ID3D12Device::CreateCommandSignature[dispatchMeshIndirect] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
+				wi::platform::ExitFatal();
+			}
 		}
 
 		allocationhandler->descriptors_res.init(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4096);
