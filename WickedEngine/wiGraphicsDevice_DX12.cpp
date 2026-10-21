@@ -2984,8 +2984,9 @@ std::mutex queue_locker;
 			hr = dx12_check(device->CreateCommandSignature(&cmd_desc, nullptr, PPV_ARGS(dispatchMeshIndirectCommandSignature)));
 			if (FAILED(hr))
 			{
-				wilog_messagebox("ID3D12Device::CreateCommandSignature[dispatchMeshIndirect] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
-				wi::platform::ExitFatal();
+				// Mesh shaders are optional, the device is used without them:
+				wilog_warning("ID3D12Device::CreateCommandSignature[dispatchMeshIndirect] failed, mesh shaders are disabled! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
+				capabilities &= ~GraphicsDeviceCapability::MESH_SHADER;
 			}
 		}
 
