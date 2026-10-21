@@ -268,6 +268,35 @@ namespace
 			wi::math::DecomposeTransform(&S, &R, &T, M, keepAxis);
 			Check(XMVector4Equal(S, expectedS) && XMVector4Equal(R, expectedR) && XMVector4Equal(T, expectedT), "DecomposeTransform() with a kept axis changed the result of a matrix without shear");
 		}
+
+		// A slight shear is accepted by XMMatrixDecompose(), but the kept axis must still be exact
+		const XMMATRIX slightly_sheared = XMMatrixRotationRollPitchYaw(0.3f, 0.2f, XM_PIDIV4) * XMMatrixScaling(1.002f, 1, 1) * XMMatrixRotationY(0.17f);
+		Check(XMMatrixDecompose(&S, &R, &T, slightly_sheared), "precondition: XMMatrixDecompose() should accept the slightly sheared matrix");
+		for (int keepAxis = 0; keepAxis < 3; ++keepAxis)
+		{
+			wi::math::DecomposeTransform(&S, &R, &T, slightly_sheared, keepAxis);
+			Check(XMVectorGetX(XMVector3Length(XMVector3Rotate(canonical[keepAxis], R) - XMVector3Normalize(slightly_sheared.r[keepAxis]))) < 1e-5f, "DecomposeTransform() with a kept axis did not keep the axis of a slightly sheared matrix");
+		}
+
+		// A kept axis of zero length has no direction to keep, the other axes still give the rotation
+		const XMMATRIX flat = XMMatrixScaling(1, 1, 0) * XMMatrixRotationRollPitchYaw(0.4f, 0.7f, 0.2f);
+		wi::math::DecomposeTransform(&S, &R, &T, flat, 2);
+		Check(IsUnitQuaternion(R) && MaxDifference(Compose(S, R, T), flat) < 1e-4f, "DecomposeTransform() with a kept axis of zero length did not decompose the matrix");
+
+		// A mirrored matrix turning slowly: the rotation must not jump (the mirroring must stay on the same axis)
+		for (int keepAxis = 0; keepAxis < 3; ++keepAxis)
+		{
+			XMVECTOR previous = XMQuaternionIdentity();
+			bool continuous = true;
+			for (int frame = 0; frame < 2000 && continuous; ++frame)
+			{
+				const XMMATRIX mirrored = XMMatrixRotationRollPitchYaw(0.001f * frame, 0.0007f * frame, 0.0003f * frame) * XMMatrixScaling(-1, 1, 1);
+				wi::math::DecomposeTransform(&S, &R, &T, mirrored, keepAxis);
+				continuous = frame == 0 || std::abs(XMVectorGetX(XMQuaternionDot(R, previous))) > 0.999f;
+				previous = R;
+			}
+			Check(continuous, "DecomposeTransform() with a kept axis jumped on a slowly turning mirrored matrix");
+		}
 	}
 
 	void TestLight()
@@ -285,7 +314,7 @@ namespace
 			{ LightComponent::RECTANGLE, "rectangle", XMVectorSet(0, 0, -1, 0) },
 		};
 		// Non-uniform scales stretching each axis, and mirrored ones
-		const XMFLOAT3 parent_scales[] = { XMFLOAT3(2, 1, 1), XMFLOAT3(1, 2, 1), XMFLOAT3(1, 1, 2), XMFLOAT3(-1, 1, 1), XMFLOAT3(-1, 2, 1) };
+		const XMFLOAT3 parent_scales[] = { XMFLOAT3(2, 1, 1), XMFLOAT3(1, 2, 1), XMFLOAT3(1, 1, 2), XMFLOAT3(1.002f, 1, 1), XMFLOAT3(-1, 1, 1), XMFLOAT3(-1, 2, 1) };
 
 		for (const LightType& type : types)
 		{

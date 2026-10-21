@@ -5100,41 +5100,37 @@ namespace wi::scene
 
 			XMMATRIX W = XMLoadFloat4x4(&transform.world);
 
-			// The rotation keeps the axis that the light direction is taken from below (Y for directional and spot lights,
-			//	Z for rectangle lights, X for point lights), so that it agrees with the direction even if the matrix has shear
+			// The light points along one axis of the matrix: Y for directional and spot lights, -Z for rectangle lights, X for point lights.
+			//	The rotation keeps that axis exactly, so that it agrees with the direction even if the matrix has shear
 			//	(a rotated light under a non-uniformly scaled parent) or mirroring:
-			const int direction_axis = light.type == LightComponent::RECTANGLE ? 2 : (light.type == LightComponent::POINT ? 0 : 1);
+			int direction_axis = 1;
+			XMVECTOR direction_local = XMVectorSet(0, 1, 0, 0);
+			if (light.type == LightComponent::RECTANGLE)
+			{
+				direction_axis = 2;
+				direction_local = XMVectorSet(0, 0, -1, 0);
+			}
+			else if (light.type == LightComponent::POINT)
+			{
+				direction_axis = 0;
+				direction_local = XMVectorSet(1, 0, 0, 0);
+			}
 			XMVECTOR S, R, T;
 			wi::math::DecomposeTransform(&S, &R, &T, W, direction_axis);
 
 			XMStoreFloat3(&light.position, T);
 			XMStoreFloat4(&light.rotation, R);
 			XMStoreFloat3(&light.scale, S);
+			XMStoreFloat3(&light.direction, XMVector3Normalize(XMVector3TransformNormal(direction_local, W)));
 
-			switch (light.type)
+			if (args.jobIndex == sun_index)
 			{
-			default:
-			case LightComponent::DIRECTIONAL:
-				XMStoreFloat3(&light.direction, XMVector3Normalize(XMVector3TransformNormal(XMVectorSet(0, 1, 0, 0), W)));
-				if (args.jobIndex == sun_index)
-				{
-					weather.sunColor = light.color;
-					weather.sunColor.x *= light.intensity;
-					weather.sunColor.y *= light.intensity;
-					weather.sunColor.z *= light.intensity;
-					weather.sunDirection = light.direction;
-					weather.stars_rotation_quaternion = light.rotation;
-				}
-				break;
-			case LightComponent::SPOT:
-				XMStoreFloat3(&light.direction, XMVector3Normalize(XMVector3TransformNormal(XMVectorSet(0, 1, 0, 0), W)));
-				break;
-			case LightComponent::POINT:
-				XMStoreFloat3(&light.direction, XMVector3Normalize(XMVector3TransformNormal(XMVectorSet(1, 0, 0, 0), W)));
-				break;
-			case LightComponent::RECTANGLE:
-				XMStoreFloat3(&light.direction, XMVector3Normalize(XMVector3TransformNormal(XMVectorSet(0, 0, -1, 0), W)));
-				break;
+				weather.sunColor = light.color;
+				weather.sunColor.x *= light.intensity;
+				weather.sunColor.y *= light.intensity;
+				weather.sunColor.z *= light.intensity;
+				weather.sunDirection = light.direction;
+				weather.stars_rotation_quaternion = light.rotation;
 			}
 
 			AABB& aabb = aabb_lights[args.jobIndex];
