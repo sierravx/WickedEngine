@@ -221,17 +221,26 @@ namespace
 
 	void TestLight()
 	{
-		Scene scene;
-		Entity parent = CreateNode(scene, XMFLOAT3(2, 1, 1), XMFLOAT3(0, 10, 0), XMFLOAT3(0, 0, 0));
-		Entity entity = CreateNode(scene, XMFLOAT3(1, 1, 1), XMFLOAT3(0, 45, 0), XMFLOAT3(0, 3, 0));
-		scene.lights.Create(entity).SetType(LightComponent::SPOT);
-		scene.Component_Attach(entity, parent, true);
-		UpdateWorldMatrices(scene);
+		// Turned about Y the light's Y axis stays the shortest axis; turned about Z its X axis becomes the longest and Y is not perpendicular to it
+		for (const XMFLOAT3& rollPitchYaw : { XMFLOAT3(0, 45, 0), XMFLOAT3(0, 0, 40) })
+		{
+			Scene scene;
+			Entity parent = CreateNode(scene, XMFLOAT3(2, 1, 1), XMFLOAT3(0, 10, 0), XMFLOAT3(0, 0, 0));
+			Entity entity = CreateNode(scene, XMFLOAT3(1, 1, 1), rollPitchYaw, XMFLOAT3(0, 3, 0));
+			scene.lights.Create(entity).SetType(LightComponent::SPOT);
+			scene.Component_Attach(entity, parent, true);
+			UpdateWorldMatrices(scene);
 
-		wi::jobsystem::context ctx;
-		scene.RunLightUpdateSystem(ctx);
-		wi::jobsystem::Wait(ctx);
-		Check(IsUnitQuaternion(scene.lights.GetComponent(entity)->rotation), "the rotation of a light under non-uniform scale is not a unit quaternion");
+			wi::jobsystem::context ctx;
+			scene.RunLightUpdateSystem(ctx);
+			wi::jobsystem::Wait(ctx);
+			const LightComponent& light = *scene.lights.GetComponent(entity);
+			Check(IsUnitQuaternion(light.rotation), "the rotation of a light under non-uniform scale is not a unit quaternion");
+
+			// The rotation orients the shadow cameras, the direction the light itself, they must agree:
+			const XMVECTOR rotated_up = XMVector3Rotate(XMVectorSet(0, 1, 0, 0), XMLoadFloat4(&light.rotation));
+			Check(XMVectorGetX(XMVector3Length(rotated_up - XMLoadFloat3(&light.direction))) < 1e-4f, "the rotation of a light under non-uniform scale does not point to the light direction");
+		}
 	}
 
 	void TestNonFiniteBone()

@@ -5102,10 +5102,22 @@ namespace wi::scene
 			XMVECTOR S, R, T;
 			wi::math::DecomposeTransform(&S, &R, &T, W);
 
+			// The direction is the Y axis of the matrix. With shear (a rotated light under a non-uniformly scaled parent),
+			//	the Y axis of the decomposed rotation can point elsewhere, then the rotation is turned to the direction:
+			const XMVECTOR D = XMVector3Normalize(XMVector3TransformNormal(XMVectorSet(0, 1, 0, 0), W));
+			const XMVECTOR Y = XMVector3Rotate(XMVectorSet(0, 1, 0, 0), R);
+			const XMVECTOR axis = XMVector3Cross(Y, D);
+			const float sin_angle = XMVectorGetX(XMVector3Length(axis));
+			if (sin_angle > 0.00001f)
+			{
+				const float angle = std::atan2(sin_angle, XMVectorGetX(XMVector3Dot(Y, D)));
+				R = XMQuaternionNormalize(XMQuaternionMultiply(R, XMQuaternionRotationNormal(axis / sin_angle, angle)));
+			}
+
 			XMStoreFloat3(&light.position, T);
 			XMStoreFloat4(&light.rotation, R);
 			XMStoreFloat3(&light.scale, S);
-			XMStoreFloat3(&light.direction, XMVector3Normalize(XMVector3TransformNormal(XMVectorSet(0, 1, 0, 0), W)));
+			XMStoreFloat3(&light.direction, D);
 
 			switch (light.type)
 			{
