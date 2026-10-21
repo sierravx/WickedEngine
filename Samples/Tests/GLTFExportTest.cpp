@@ -6,9 +6,11 @@
 #define TINYGLTF_NO_STB_IMAGE_WRITE
 #include "tiny_gltf.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <set>
 #include <string>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -39,13 +41,13 @@ namespace
 		}
 	}
 
-	bool Near(const wi::vector<float>& a, const wi::vector<float>& b)
+	bool Near(const wi::vector<float>& a, const wi::vector<float>& b, float tolerance = 1e-4f)
 	{
 		if (a.size() != b.size())
 			return false;
 		for (size_t i = 0; i < a.size(); ++i)
 		{
-			if (std::abs(a[i] - b[i]) > 1e-4f)
+			if (std::abs(a[i] - b[i]) > tolerance)
 				return false;
 		}
 		return true;
@@ -71,16 +73,36 @@ namespace
 		return entity;
 	}
 
+	Entity CreateMorphedMesh(Scene& scene, Entity material)
+	{
+		Entity entity = CreateEntity();
+		MeshComponent& mesh = scene.meshes.Create(entity);
+		mesh.vertex_positions = { XMFLOAT3(0, 0, 0), XMFLOAT3(1, 0, 0), XMFLOAT3(0, 1, 0) };
+		mesh.vertex_normals = { XMFLOAT3(0, 0, 1), XMFLOAT3(0, 0, 1), XMFLOAT3(0, 0, 1) };
+		mesh.indices = { 0, 1, 2 };
+		MeshComponent::MeshSubset& subset = mesh.subsets.emplace_back();
+		subset.materialID = material;
+		subset.indexCount = 3;
+		mesh.morph_targets.emplace_back().vertex_positions = { XMFLOAT3(0, 0, 1), XMFLOAT3(0, 0, 1), XMFLOAT3(0, 0, 1) };
+		mesh.CreateRenderData();
+		return entity;
+	}
+
 	// What the runtime evaluates for a translation key of a retargeted channel (see Scene::RunAnimationUpdateSystem())
+	XMVECTOR RetargetTranslation(const TransformComponent& source, const XMFLOAT4X4& dst, const XMFLOAT4X4& src, XMVECTOR key)
+	{
+		TransformComponent transform = source;
+		XMStoreFloat3(&transform.translation_local, key);
+		XMVECTOR S, R, T;
+		wi::math::DecomposeTransform(&S, &R, &T, XMLoadFloat4x4(&dst) * transform.GetLocalMatrix() * XMLoadFloat4x4(&src));
+		return T;
+	}
 	wi::vector<float> RetargetTranslations(const TransformComponent& source, const XMFLOAT4X4& dst, const XMFLOAT4X4& src, const wi::vector<float>& keys)
 	{
 		wi::vector<float> result;
 		for (size_t i = 0; i + 3 <= keys.size(); i += 3)
 		{
-			TransformComponent transform = source;
-			transform.translation_local = XMFLOAT3(keys[i], keys[i + 1], keys[i + 2]);
-			XMVECTOR S, R, T;
-			wi::math::DecomposeTransform(&S, &R, &T, XMLoadFloat4x4(&dst) * transform.GetLocalMatrix() * XMLoadFloat4x4(&src));
+			const XMVECTOR T = RetargetTranslation(source, dst, src, XMVectorSet(keys[i], keys[i + 1], keys[i + 2], 0));
 			result.push_back(XMVectorGetX(T));
 			result.push_back(XMVectorGetY(T));
 			result.push_back(XMVectorGetZ(T));
@@ -88,7 +110,7 @@ namespace
 		return result;
 	}
 
-	// The engine's translation keys in the glTF space
+	// The engine's keys in the glTF space
 	wi::vector<float> MirrorTranslations(wi::vector<float> keys)
 	{
 		for (size_t i = 2; i < keys.size(); i += 3)
@@ -96,6 +118,10 @@ namespace
 			keys[i] = -keys[i];
 		}
 		return keys;
+	}
+	XMVECTOR MirrorRotation(XMVECTOR Q)
+	{
+		return XMVectorMultiply(Q, XMVectorSet(-1, -1, 1, 1));
 	}
 
 	wi::vector<float> ReadAccessor(const tinygltf::Model& model, int accessor_index)
@@ -108,64 +134,93 @@ namespace
 		return wi::vector<float>(values, values + accessor.count * components);
 	}
 
-	int RunExport()
+	int RunExport(int device_created_pipe)
 	{
 		wi::jobsystem::Initialize();
 		wi::graphics::GetDevice() = new wi::graphics::GraphicsDevice_Vulkan(nullptr); // ends the process with EXIT_FAILURE without a device
+		// Tell the parent that the device was created, so that later failures are not taken for a missing device:
+		if (write(device_created_pipe, "1", 1) != 1)
+			return TEST_FAILED;
+		close(device_created_pipe);
 
-		Scene other; // the source of an animation retargeted from an other scene
+		std::remove(output_file); // a file of an earlier run must not be checked
+
+		Scene other; // the source of animations retargeted from an other scene
 		Scene scene;
 
 		Entity a = CreateNode(scene, "A", XMFLOAT3(0, 0, 1));
 		Entity b = CreateNode(scene, "B", XMFLOAT3(1, 0, 0));
 		Entity source = CreateNode(scene, "Source", XMFLOAT3(0, 1, 0.5f), XMFLOAT3(0.3f, 0.2f, 0.1f));
 		Entity destination = CreateNode(scene, "Destination", XMFLOAT3(0, 2, 0));
+		Entity cubic_destination = CreateNode(scene, "CubicDestination", XMFLOAT3(0, 2, 1));
+		Entity cubic_rotation_destination = CreateNode(scene, "CubicRotationDestination", XMFLOAT3(0, 2, 2));
 		Entity other_destination = CreateNode(scene, "OtherDestination", XMFLOAT3(0, 3, 0));
+		Entity missing_source_destination = CreateNode(scene, "MissingSourceDestination", XMFLOAT3(0, 3, 1));
 		Entity other_source = CreateNode(other, "OtherSource", XMFLOAT3(0.5f, 1, 0), XMFLOAT3(-0.2f, 0.4f, 0));
 		Entity no_transform = CreateEntity();
 
-		// A mesh with a morph target, the weights of which can be animated
+		XMFLOAT4 light_rotation;
+		XMStoreFloat4(&light_rotation, XMQuaternionRotationRollPitchYaw(0.4f, 0.6f, 0.2f));
+		Entity light = CreateNode(scene, "Light", XMFLOAT3(0, 5, 0));
+		scene.transforms.GetComponent(light)->rotation_local = light_rotation;
+		scene.transforms.GetComponent(light)->SetDirty();
+		scene.lights.Create(light).SetType(LightComponent::SPOT);
+
+		// Meshes with a morph target, the weights of which can be animated (the first one has two objects)
+		Entity material = CreateEntity();
+		scene.materials.Create(material);
+		Entity mesh = CreateMorphedMesh(scene, material);
+		Entity other_mesh = CreateMorphedMesh(scene, material);
 		Entity morphed = CreateNode(scene, "Morphed", XMFLOAT3(0, 0, 0));
-		Entity meshEntity = CreateEntity();
-		Entity materialEntity = CreateEntity();
-		scene.materials.Create(materialEntity);
-		{
-			MeshComponent& mesh = scene.meshes.Create(meshEntity);
-			mesh.vertex_positions = { XMFLOAT3(0, 0, 0), XMFLOAT3(1, 0, 0), XMFLOAT3(0, 1, 0) };
-			mesh.vertex_normals = { XMFLOAT3(0, 0, 1), XMFLOAT3(0, 0, 1), XMFLOAT3(0, 0, 1) };
-			mesh.indices = { 0, 1, 2 };
-			MeshComponent::MeshSubset& subset = mesh.subsets.emplace_back();
-			subset.materialID = materialEntity;
-			subset.indexCount = 3;
-			mesh.morph_targets.emplace_back().vertex_positions = { XMFLOAT3(0, 0, 1), XMFLOAT3(0, 0, 1), XMFLOAT3(0, 0, 1) };
-			mesh.CreateRenderData();
-		}
-		scene.objects.Create(morphed).meshID = meshEntity;
+		Entity morphed_instance = CreateNode(scene, "MorphedInstance", XMFLOAT3(2, 0, 0));
+		Entity other_morphed = CreateNode(scene, "OtherMorphed", XMFLOAT3(4, 0, 0));
+		scene.objects.Create(morphed).meshID = mesh;
+		scene.objects.Create(morphed_instance).meshID = mesh;
+		scene.objects.Create(other_morphed).meshID = other_mesh;
 
 		const wi::vector<float> times = { 0, 1 };
 		const wi::vector<float> translation_keys = { 0, 0, 1, 0, 0, 2 };
+		const wi::vector<float> last_translation_keys = { 0, 0, 3, 0, 0, 4 };
 		const wi::vector<float> shared_keys = { 1, 1, 1, 2, 2, 2 };
 		const wi::vector<float> retarget_keys = { 0, 0, 1, 1, 0, 0 };
 		const wi::vector<float> weight_keys = { 0, 1 };
+		const wi::vector<float> light_keys = { light_rotation.x, light_rotation.y, light_rotation.z, light_rotation.w, 0, 0.6f, 0, 0.8f };
+		// Cubic spline keys are an in-tangent, a value and an out-tangent:
+		const wi::vector<float> cubic_translation_keys = { 0.5f, 0, 0, 0, 0, 1, 1, 0.5f, 0, 0, 1, 0, 1, 0, 0, 0.2f, 0.3f, 0.4f };
+		const XMVECTOR q0 = XMQuaternionRotationRollPitchYaw(0.1f, 0.2f, 0.3f);
+		const XMVECTOR q1 = XMQuaternionRotationRollPitchYaw(0.5f, -0.4f, 0.2f);
+		const XMFLOAT4 m[4] = { XMFLOAT4(0.1f, 0.2f, -0.1f, 0.3f), XMFLOAT4(-0.2f, 0.1f, 0.4f, 0.05f), XMFLOAT4(0.3f, -0.1f, 0.2f, -0.2f), XMFLOAT4(0.05f, 0.2f, 0.1f, 0.1f) };
+		const wi::vector<float> cubic_rotation_keys = {
+			m[0].x, m[0].y, m[0].z, m[0].w, XMVectorGetX(q0), XMVectorGetY(q0), XMVectorGetZ(q0), XMVectorGetW(q0), m[1].x, m[1].y, m[1].z, m[1].w,
+			m[2].x, m[2].y, m[2].z, m[2].w, XMVectorGetX(q1), XMVectorGetY(q1), XMVectorGetZ(q1), XMVectorGetW(q1), m[3].x, m[3].y, m[3].z, m[3].w,
+		};
 		Entity translation_data = CreateData(scene, times, translation_keys);
+		Entity last_translation_data = CreateData(scene, times, last_translation_keys);
 		Entity shared_data = CreateData(scene, times, shared_keys);
 		Entity retarget_data = CreateData(scene, times, retarget_keys);
+		Entity cubic_translation_data = CreateData(scene, times, cubic_translation_keys);
+		Entity cubic_rotation_data = CreateData(scene, times, cubic_rotation_keys);
 		Entity weight_data = CreateData(scene, times, weight_keys);
+		Entity light_data = CreateData(scene, times, light_keys);
 		Entity empty_data = CreateData(scene, {}, {});
 		Entity other_data = CreateData(other, times, retarget_keys);
+		Entity other_weight_data = CreateData(other, times, weight_keys);
 
 		XMFLOAT4X4 retarget_dst, retarget_src;
-		XMStoreFloat4x4(&retarget_dst, XMMatrixRotationRollPitchYaw(0.3f, 0.5f, 0.7f) * XMMatrixTranslation(1, 2, 3));
-		XMStoreFloat4x4(&retarget_src, XMMatrixRotationRollPitchYaw(-0.2f, 0.4f, 0.1f) * XMMatrixTranslation(-1, 0, 2));
+		const XMVECTOR qD = XMQuaternionRotationRollPitchYaw(0.3f, 0.5f, 0.7f);
+		const XMVECTOR qP = XMQuaternionRotationRollPitchYaw(-0.2f, 0.4f, 0.1f);
+		XMStoreFloat4x4(&retarget_dst, XMMatrixRotationQuaternion(qD) * XMMatrixTranslation(1, 2, 3));
+		XMStoreFloat4x4(&retarget_src, XMMatrixRotationQuaternion(qP) * XMMatrixTranslation(-1, 0, 2));
 
 		Entity animationEntity = CreateEntity();
 		scene.names.Create(animationEntity) = "anim";
 		{
 			AnimationComponent& animation = scene.animations.Create(animationEntity);
-			auto add_sampler = [&](Entity data, const Scene* data_scene = nullptr) {
+			auto add_sampler = [&](Entity data, const Scene* data_scene = nullptr, AnimationComponent::AnimationSampler::Mode mode = AnimationComponent::AnimationSampler::Mode::LINEAR) {
 				AnimationComponent::AnimationSampler& sampler = animation.samplers.emplace_back();
 				sampler.data = data;
 				sampler.scene = data_scene;
+				sampler.mode = mode;
 				return int(animation.samplers.size() - 1);
 			};
 			auto add_channel = [&](Entity target, int sampler, Path path, int retarget = -1) {
@@ -175,29 +230,34 @@ namespace
 				channel.path = path;
 				channel.retargetIndex = retarget;
 			};
+			auto add_retarget = [&](Entity source_entity) {
+				AnimationComponent::RetargetSourceData& retarget = animation.retargets.emplace_back();
+				retarget.source = source_entity;
+				retarget.dstRelativeMatrix = retarget_dst;
+				retarget.srcRelativeParentMatrix = retarget_src;
+				return int(animation.retargets.size() - 1);
+			};
+			const auto cubic = AnimationComponent::AnimationSampler::Mode::CUBICSPLINE;
 			const int translation_sampler = add_sampler(translation_data);
 			const int shared_sampler = add_sampler(shared_data);
-			add_channel(a, translation_sampler, Path::TRANSLATION); // exported, mirrored
+			add_channel(a, translation_sampler, Path::TRANSLATION); // replaced by the later channel of A
 			add_channel(a, translation_sampler, Path::LIGHT_COLOR); // nothing to animate in glTF
 			add_channel(INVALID_ENTITY, translation_sampler, Path::TRANSLATION); // no target
 			add_channel(no_transform, translation_sampler, Path::TRANSLATION); // target without a node
 			add_channel(b, add_sampler(empty_data), Path::TRANSLATION); // no keys
 			add_channel(b, 1000, Path::TRANSLATION); // invalid sampler
 			add_channel(a, add_sampler(weight_data), Path::WEIGHTS); // no morph targets
-			add_channel(morphed, add_sampler(weight_data), Path::WEIGHTS); // exported
+			add_channel(morphed, add_sampler(weight_data), Path::WEIGHTS); // exported for both objects of the mesh
 			add_channel(b, shared_sampler, Path::TRANSLATION); // exported, mirrored
 			add_channel(b, shared_sampler, Path::SCALE); // exported, not mirrored
-
-			AnimationComponent::RetargetSourceData& same = animation.retargets.emplace_back();
-			same.source = source;
-			same.dstRelativeMatrix = retarget_dst;
-			same.srcRelativeParentMatrix = retarget_src;
-			add_channel(destination, add_sampler(retarget_data), Path::TRANSLATION, 0); // baked
-			AnimationComponent::RetargetSourceData& from_other = animation.retargets.emplace_back();
-			from_other.source = other_source;
-			from_other.dstRelativeMatrix = retarget_dst;
-			from_other.srcRelativeParentMatrix = retarget_src;
-			add_channel(other_destination, add_sampler(other_data, &other), Path::TRANSLATION, 1); // baked
+			add_channel(destination, add_sampler(retarget_data), Path::TRANSLATION, add_retarget(source)); // baked
+			add_channel(other_destination, add_sampler(other_data, &other), Path::TRANSLATION, add_retarget(other_source)); // baked
+			add_channel(a, add_sampler(last_translation_data), Path::TRANSLATION); // the last channel of A is exported
+			add_channel(cubic_destination, add_sampler(cubic_translation_data, nullptr, cubic), Path::TRANSLATION, add_retarget(source)); // baked with tangents
+			add_channel(cubic_rotation_destination, add_sampler(cubic_rotation_data, nullptr, cubic), Path::ROTATION, add_retarget(source)); // baked with tangents
+			add_channel(missing_source_destination, add_sampler(other_data, &other), Path::TRANSLATION, add_retarget(no_transform)); // played as it is
+			add_channel(light, add_sampler(light_data), Path::ROTATION); // with the light's forward flip
+			add_channel(other_mesh, add_sampler(other_weight_data, &other), Path::WEIGHTS); // the mesh as target, weights of an other scene
 		}
 		{
 			Entity entity = CreateEntity();
@@ -210,9 +270,35 @@ namespace
 			channel.path = Path::MATERIAL_COLOR;
 		}
 
-		const wi::vector<float> expected_same = MirrorTranslations(RetargetTranslations(*scene.transforms.GetComponent(source), retarget_dst, retarget_src, retarget_keys));
+		const TransformComponent& source_transform = *scene.transforms.GetComponent(source);
+		const wi::vector<float> expected_same = MirrorTranslations(RetargetTranslations(source_transform, retarget_dst, retarget_src, retarget_keys));
 		const wi::vector<float> expected_other = MirrorTranslations(RetargetTranslations(*other.transforms.GetComponent(other_source), retarget_dst, retarget_src, retarget_keys));
+		wi::vector<float> expected_cubic_translation;
+		for (size_t key = 0; key < 2; ++key)
+		{
+			auto at = [&](size_t i) { return XMVectorSet(cubic_translation_keys[key * 9 + i * 3], cubic_translation_keys[key * 9 + i * 3 + 1], cubic_translation_keys[key * 9 + i * 3 + 2], 0); };
+			const XMVECTOR value = RetargetTranslation(source_transform, retarget_dst, retarget_src, at(1));
+			const XMVECTOR results[3] = {
+				RetargetTranslation(source_transform, retarget_dst, retarget_src, at(1) + at(0)) - value, // the translation is retargeted by an affine function
+				value,
+				RetargetTranslation(source_transform, retarget_dst, retarget_src, at(1) + at(2)) - value,
+			};
+			for (const XMVECTOR& result : results)
+			{
+				expected_cubic_translation.push_back(XMVectorGetX(result));
+				expected_cubic_translation.push_back(XMVectorGetY(result));
+				expected_cubic_translation.push_back(-XMVectorGetZ(result));
+			}
+		}
+
 		const TransformComponent a_original = *scene.transforms.GetComponent(a);
+		const size_t sampler_count = scene.animations.GetComponent(animationEntity)->samplers.size();
+		wi::vector<int> channel_samplers;
+		for (const AnimationComponent::AnimationChannel& channel : scene.animations.GetComponent(animationEntity)->channels)
+		{
+			channel_samplers.push_back(channel.samplerIndex);
+		}
+		const size_t data_count = scene.animation_datas.GetCount();
 
 		ExportModel_GLTF(output_file, scene);
 
@@ -222,6 +308,12 @@ namespace
 		Check(scene.animation_datas.GetComponent(translation_data)->keyframe_data == translation_keys && scene.animation_datas.GetComponent(shared_data)->keyframe_data == shared_keys, "the animation keys were not restored after the export");
 		const AnimationComponent& animation = *scene.animations.GetComponent(animationEntity);
 		Check(std::memcmp(&animation.retargets[0].dstRelativeMatrix, &retarget_dst, sizeof(XMFLOAT4X4)) == 0 && std::memcmp(&animation.retargets[1].srcRelativeParentMatrix, &retarget_src, sizeof(XMFLOAT4X4)) == 0, "the retarget matrices were not restored after the export");
+		bool same_samplers = animation.samplers.size() == sampler_count && animation.channels.size() == channel_samplers.size() && scene.animation_datas.GetCount() == data_count;
+		for (size_t i = 0; same_samplers && i < channel_samplers.size(); ++i)
+		{
+			same_samplers = animation.channels[i].samplerIndex == channel_samplers[i];
+		}
+		Check(same_samplers, "the samplers or animation data of the scene were changed by the export");
 
 		// Load the file and check it
 		tinygltf::TinyGLTF loader;
@@ -231,6 +323,14 @@ namespace
 		{
 			Check(false, "the exported file could not be loaded: " + err);
 			return TEST_FAILED;
+		}
+		std::remove(output_file);
+		for (const tinygltf::Buffer& buffer : model.buffers)
+		{
+			if (!buffer.uri.empty())
+			{
+				std::remove(buffer.uri.c_str());
+			}
 		}
 
 		auto node_index = [&](const std::string& name) {
@@ -246,7 +346,7 @@ namespace
 		if (model.animations.size() != 1)
 			return TEST_FAILED;
 		const tinygltf::Animation& exported = model.animations[0];
-		Check(exported.channels.size() == 6, "expected 6 exported channels, got " + std::to_string(exported.channels.size()));
+		Check(exported.channels.size() == 12, "expected 12 exported channels, got " + std::to_string(exported.channels.size()));
 
 		for (const tinygltf::AnimationSampler& sampler : exported.samplers)
 		{
@@ -268,6 +368,7 @@ namespace
 			}
 			return wi::vector<float>();
 		};
+		std::set<std::pair<int, std::string>> targets;
 		for (const tinygltf::AnimationChannel& channel : exported.channels)
 		{
 			Check(channel.target_node >= 0 && channel.target_node < (int)model.nodes.size(), "a channel has an invalid target node");
@@ -275,16 +376,49 @@ namespace
 			Check(channel.target_path == "translation" || channel.target_path == "rotation" || channel.target_path == "scale" || channel.target_path == "weights", "a channel has an invalid path");
 			if (channel.target_path == "weights")
 			{
-				Check(channel.target_node == node_index("Morphed"), "weights were exported for a node without morph targets");
+				const int node = channel.target_node;
+				Check(node == node_index("Morphed") || node == node_index("MorphedInstance") || node == node_index("OtherMorphed"), "weights were exported for a node without morph targets");
 			}
+			Check(targets.insert({ channel.target_node, channel.target_path }).second, "a path of a node is animated by more than one channel");
 		}
 
-		Check(Near(find_values("A", "translation"), MirrorTranslations(translation_keys)), "the translation keys were not exported mirrored");
-		Check(Near(find_values("Morphed", "weights"), weight_keys), "the morph target weights were not exported");
+		Check(Near(find_values("A", "translation"), MirrorTranslations(last_translation_keys)), "the last translation channel of a node was not the exported one");
+		Check(Near(find_values("Morphed", "weights"), weight_keys) && Near(find_values("MorphedInstance", "weights"), weight_keys), "the morph target weights were not exported for every object of the mesh");
+		Check(Near(find_values("OtherMorphed", "weights"), weight_keys), "the weights of an other scene, with the mesh as target, were not exported");
 		Check(Near(find_values("B", "translation"), MirrorTranslations(shared_keys)), "the translation keys shared with a scale channel were not exported mirrored");
 		Check(Near(find_values("B", "scale"), shared_keys), "the scale keys shared with a translation channel were not exported as they are");
 		Check(Near(find_values("Destination", "translation"), expected_same), "the channel retargeted from this scene was not baked");
 		Check(Near(find_values("OtherDestination", "translation"), expected_other), "the channel retargeted from an other scene was not baked");
+		Check(Near(find_values("MissingSourceDestination", "translation"), MirrorTranslations(retarget_keys)), "the keys of an other scene without a retarget source were not exported mirrored");
+		Check(Near(find_values("CubicDestination", "translation"), expected_cubic_translation, 1e-3f), "the tangents of a retargeted cubic spline translation were not baked as derivatives");
+
+		// Cubic rotation: with rigid retarget matrices the retargeting is the linear qD * q * qP (in the order of XMQuaternionMultiply),
+		//	so the baked tangents are the same function of the tangents (up to the sign of the key)
+		{
+			const wi::vector<float> values = find_values("CubicRotationDestination", "rotation");
+			bool ok = values.size() == cubic_rotation_keys.size();
+			for (size_t key = 0; ok && key < 2; ++key)
+			{
+				auto exported_at = [&](size_t i) { return MirrorRotation(XMLoadFloat4((const XMFLOAT4*)&values[key * 12 + i * 4])); }; // back to the engine space
+				auto source_at = [&](size_t i) { return XMLoadFloat4((const XMFLOAT4*)&cubic_rotation_keys[key * 12 + i * 4]); };
+				auto retargeted = [&](XMVECTOR Q) { return XMQuaternionMultiply(XMQuaternionMultiply(qD, Q), qP); };
+				const XMVECTOR expected_value = retargeted(source_at(1));
+				const float sign = XMVectorGetX(XMVector4Dot(exported_at(1), expected_value)) < 0 ? -1.0f : 1.0f;
+				for (size_t i = 0; i < 3; ++i)
+				{
+					ok &= XMVectorGetX(XMVector4Length(exported_at(i) - sign * retargeted(source_at(i)))) < 1e-3f;
+				}
+			}
+			Check(ok, "the tangents of a retargeted cubic spline rotation were not baked as derivatives");
+		}
+
+		// The first light key is the light's own rotation, which is exported as the node's rotation (with the forward flip)
+		{
+			const wi::vector<float> values = find_values("Light", "rotation");
+			const tinygltf::Node& node = model.nodes[node_index("Light")];
+			const wi::vector<float> node_rotation = { float(node.rotation[0]), float(node.rotation[1]), float(node.rotation[2]), float(node.rotation[3]) };
+			Check(values.size() == 8 && Near(wi::vector<float>(values.begin(), values.begin() + 4), node_rotation), "the rotation keys of a light did not get the light's forward flip");
+		}
 
 		if (failures > 0)
 			return TEST_FAILED;
@@ -295,18 +429,24 @@ namespace
 
 int main(int argc, char** argv)
 {
-	if (argc > 1 && std::strcmp(argv[1], "--child") == 0)
+	if (argc > 2 && std::strcmp(argv[1], "--child") == 0)
 	{
 		// No error message box if the device can't be created:
 		unsetenv("DISPLAY");
 		unsetenv("WAYLAND_DISPLAY");
 		unsetenv("XDG_RUNTIME_DIR");
-		const int result = RunExport();
+		const int result = RunExport(std::atoi(argv[2]));
 		std::cout.flush();
 		std::cerr.flush();
 		std::_Exit(result); // without destroying the device in the static destructors
 	}
 
+	int device_created[2];
+	if (pipe(device_created) != 0)
+	{
+		std::cerr << "GLTFExport test failed: pipe() failed\n";
+		return 1;
+	}
 	pid_t pid = fork();
 	if (pid < 0)
 	{
@@ -315,14 +455,21 @@ int main(int argc, char** argv)
 	}
 	if (pid == 0)
 	{
-		execl("/proc/self/exe", argv[0], "--child", (char*)nullptr);
+		close(device_created[0]);
+		const std::string fd = std::to_string(device_created[1]);
+		execl("/proc/self/exe", argv[0], "--child", fd.c_str(), (char*)nullptr);
 		_exit(127);
 	}
+	close(device_created[1]);
 	int status = 0;
 	waitpid(pid, &status, 0);
+	char byte = 0;
+	const bool created = read(device_created[0], &byte, 1) == 1;
+	close(device_created[0]);
+
 	if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
 		return 0;
-	if (WIFEXITED(status) && WEXITSTATUS(status) == EXIT_FAILURE)
+	if (!created && WIFEXITED(status) && WEXITSTATUS(status) == EXIT_FAILURE)
 	{
 		std::cout << "GLTFExport test skipped: no Vulkan device could be created\n";
 		return TEST_SKIPPED;
@@ -330,6 +477,10 @@ int main(int argc, char** argv)
 	if (WIFSIGNALED(status))
 	{
 		std::cerr << "GLTFExport test failed: the export crashed with signal " << WTERMSIG(status) << '\n';
+	}
+	else if (WIFEXITED(status) && WEXITSTATUS(status) == EXIT_FAILURE)
+	{
+		std::cerr << "GLTFExport test failed: the export ended the process with EXIT_FAILURE\n";
 	}
 	return 1;
 }

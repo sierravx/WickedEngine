@@ -151,6 +151,7 @@ struct LoaderState
 	//Export states
 	wi::unordered_map<std::string, int> textureMap; // path -> textureid
 	wi::unordered_map<Entity, int> nodeMap;// entity -> node
+	FlipZAxisSplits flip_splits; // animation data split by FlipZAxis(), undone after the export
 };
 
 void Import_Extension_VRM(LoaderState& state);
@@ -377,7 +378,7 @@ void FlipZAxis(LoaderState& state)
 	}
 
 	// Flip transforms, bind poses and animations
-	FlipZAxisTransforms(wiscene, state.rootEntity);
+	FlipZAxisTransforms(wiscene, state.rootEntity, &state.flip_splits);
 }
 
 static const wi::unordered_set<std::string> SUPPORTED_EXTENSIONS = {
@@ -5094,36 +5095,115 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		};
 
 		// A channel retargeted without baking is evaluated from the keys of the source animation at runtime, as
-		//	dstRelativeMatrix * source local transform * srcRelativeParentMatrix (see Scene::RunAnimationUpdateSystem()).
-		//	It is baked the same way as Scene::RetargetAnimation() bakes it (including the tangents of cubic spline keys):
-		auto bake_retarget = [](const AnimationComponent::RetargetSourceData& retarget, const TransformComponent* source, Path path, wi::vector<float>& values) {
-			if (source == nullptr)
-				return; // without the source transform, the keys are played as they are
+		//	dstRelativeMatrix * source local transform * srcRelativeParentMatrix (see Scene::RunAnimationUpdateSystem()),
+		//	it is baked the same way. The tangents of cubic spline keys are derivatives, they are carried through the
+		//	derivative of the retargeting.
+		auto bake_retarget = [](const AnimationComponent::RetargetSourceData& retarget, const TransformComponent& source, Path path, bool cubic, wi::vector<float>& values) {
 			const XMMATRIX dstRelativeMatrix = XMLoadFloat4x4(&retarget.dstRelativeMatrix);
 			const XMMATRIX srcRelativeParentMatrix = XMLoadFloat4x4(&retarget.srcRelativeParentMatrix);
 			const size_t components = path == Path::ROTATION ? 4 : 3;
-			for (size_t offset = 0; offset + components <= values.size(); offset += components)
-			{
-				TransformComponent transform = *source;
-				if (path == Path::TRANSLATION)
+			auto load = [&](size_t offset) {
+				return path == Path::ROTATION ? XMLoadFloat4((const XMFLOAT4*)&values[offset]) : XMLoadFloat3((const XMFLOAT3*)&values[offset]);
+			};
+			auto store = [&](size_t offset, XMVECTOR V) {
+				if (path == Path::ROTATION)
 				{
-					transform.translation_local = XMFLOAT3(values[offset], values[offset + 1], values[offset + 2]);
-				}
-				else if (path == Path::ROTATION)
-				{
-					transform.rotation_local = XMFLOAT4(values[offset], values[offset + 1], values[offset + 2], values[offset + 3]);
+					XMStoreFloat4((XMFLOAT4*)&values[offset], V);
 				}
 				else
 				{
-					transform.scale_local = XMFLOAT3(values[offset], values[offset + 1], values[offset + 2]);
+					XMStoreFloat3((XMFLOAT3*)&values[offset], V);
+				}
+			};
+			auto retargeted = [&](XMVECTOR V) {
+				TransformComponent transform = source;
+				if (path == Path::TRANSLATION)
+				{
+					XMStoreFloat3(&transform.translation_local, V);
+				}
+				else if (path == Path::ROTATION)
+				{
+					XMStoreFloat4(&transform.rotation_local, V);
+				}
+				else
+				{
+					XMStoreFloat3(&transform.scale_local, V);
 				}
 				XMVECTOR S, R, T;
 				wi::math::DecomposeTransform(&S, &R, &T, dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix);
-				const XMVECTOR V = path == Path::TRANSLATION ? T : (path == Path::ROTATION ? R : S);
-				for (size_t i = 0; i < components; ++i)
+				return path == Path::TRANSLATION ? T : (path == Path::ROTATION ? R : S);
+			};
+			// The derivative of the retargeting at value (retargeted to result), in the direction of tangent:
+			auto retargeted_tangent = [&](XMVECTOR value, XMVECTOR result, XMVECTOR tangent) {
+				if (path == Path::TRANSLATION)
 				{
-					values[offset + i] = XMVectorGetByIndex(V, i);
+					return retargeted(value + tangent) - result; // the translation is retargeted by an affine function
 				}
+				if (path == Path::ROTATION)
+				{
+					// For unit quaternions, the part of the tangent along the rotation scales it, the rest turns it:
+					const XMVECTOR unit = XMQuaternionNormalize(value);
+					const XMVECTOR radial = XMVector4Dot(tangent, unit);
+					const XMVECTOR turn = tangent - radial * unit;
+					const float step = 0.001f / std::max(1.0f, XMVectorGetX(XMVector4Length(turn)));
+					XMVECTOR a = retargeted(XMQuaternionNormalize(unit + step * turn));
+					XMVECTOR b = retargeted(XMQuaternionNormalize(unit - step * turn));
+					if (XMVectorGetX(XMVector4Dot(a, result)) < 0)
+						a = -a;
+					if (XMVectorGetX(XMVector4Dot(b, result)) < 0)
+						b = -b;
+					return (a - b) / (2 * step) + radial * result;
+				}
+				const float step = 0.001f / std::max(1.0f, XMVectorGetX(XMVector3Length(tangent)));
+				return (retargeted(value + step * tangent) - retargeted(value - step * tangent)) / (2 * step);
+			};
+
+			// A cubic spline key is an in-tangent, a value and an out-tangent:
+			const size_t stride = cubic ? components * 3 : components;
+			const size_t value_offset = cubic ? components : 0;
+			XMVECTOR previous = XMVectorZero();
+			for (size_t offset = 0; offset + stride <= values.size(); offset += stride)
+			{
+				const XMVECTOR value = load(offset + value_offset);
+				const XMVECTOR result = retargeted(value);
+				// The rotations stay in the hemisphere of the previous key, so they are interpolated the short way:
+				const float sign = path == Path::ROTATION && offset > 0 && XMVectorGetX(XMVector4Dot(result, previous)) < 0 ? -1.0f : 1.0f;
+				if (cubic)
+				{
+					store(offset, sign * retargeted_tangent(value, result, load(offset)));
+					store(offset + 2 * components, sign * retargeted_tangent(value, result, load(offset + 2 * components)));
+				}
+				store(offset + value_offset, sign * result);
+				previous = sign * result;
+			}
+		};
+
+		// Mirrors keys (and the tangents of cubic spline keys) like the flip of the scene mirrors them, for keys of an other scene:
+		auto mirror_keys = [](Path path, wi::vector<float>& values) {
+			if (path == Path::TRANSLATION)
+			{
+				for (size_t i = 2; i < values.size(); i += 3)
+				{
+					values[i] = -values[i];
+				}
+			}
+			else if (path == Path::ROTATION)
+			{
+				for (size_t i = 0; i + 1 < values.size(); i += 4)
+				{
+					values[i] = -values[i];
+					values[i + 1] = -values[i + 1];
+				}
+			}
+		};
+
+		// Light nodes are written with a forward flip in their rotation (see the nodes above), their rotation keys get it too.
+		//	It is a constant rotation multiplied with every key, which also applies to the tangents of cubic spline keys:
+		const XMVECTOR light_forward_flip = XMQuaternionRotationRollPitchYaw(-XM_PIDIV2, 0, 0);
+		auto flip_light_keys = [&](wi::vector<float>& values) {
+			for (size_t i = 0; i + 4 <= values.size(); i += 4)
+			{
+				XMStoreFloat4((XMFLOAT4*)&values[i], XMQuaternionMultiply(light_forward_flip, XMLoadFloat4((const XMFLOAT4*)&values[i])));
 			}
 		};
 
@@ -5146,15 +5226,13 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				animation_builder.name = name->name;
 			}
 
-			wi::unordered_map<int, int> sampler_remap; // sampler index and accessor type -> glTF sampler index, for the channels that are not baked
+			wi::unordered_map<int, int> sampler_remap; // sampler index and accessor type -> glTF sampler index, for the keys that are written as they are
+			wi::unordered_map<uint64_t, size_t> target_channels; // node and path -> glTF channel index
 			for (const AnimationComponent::AnimationChannel& channel : animation.channels)
 			{
-				auto node = state.nodeMap.find(channel.target);
-				if (node == state.nodeMap.end())
-					continue; // the target is not exported as a node (it was removed, or it has no transform)
-
 				const char* target_path = nullptr;
 				int type = TINYGLTF_TYPE_VEC3;
+				wi::vector<int> target_nodes;
 				switch (channel.path)
 				{
 				case Path::TRANSLATION:
@@ -5169,11 +5247,26 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					break;
 				case Path::WEIGHTS:
 				{
-					// Only a mesh with morph targets has weights:
-					const ObjectComponent* object = wiscene.objects.GetComponent(channel.target);
-					const MeshComponent* mesh = object == nullptr ? nullptr : wiscene.meshes.GetComponent(object->meshID);
+					// The weights are in the mesh (the target is the mesh, or an object of it), every node of that mesh shows them:
+					Entity meshEntity = channel.target;
+					if (!wiscene.meshes.Contains(meshEntity))
+					{
+						const ObjectComponent* object = wiscene.objects.GetComponent(channel.target);
+						meshEntity = object == nullptr ? INVALID_ENTITY : object->meshID;
+					}
+					const MeshComponent* mesh = wiscene.meshes.GetComponent(meshEntity);
 					if (mesh == nullptr || mesh->morph_targets.empty())
 						continue;
+					for (size_t object_id = 0; object_id < wiscene.objects.GetCount(); ++object_id)
+					{
+						if (wiscene.objects[object_id].meshID != meshEntity)
+							continue;
+						auto node = state.nodeMap.find(wiscene.objects.GetEntity(object_id));
+						if (node != state.nodeMap.end())
+						{
+							target_nodes.push_back(node->second);
+						}
+					}
 					target_path = "weights";
 					type = TINYGLTF_TYPE_SCALAR;
 				}
@@ -5181,6 +5274,16 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				default:
 					continue; // light, material, camera, sound, script and other channels have nothing to animate in glTF
 				}
+				if (channel.path != Path::WEIGHTS)
+				{
+					auto node = state.nodeMap.find(channel.target);
+					if (node != state.nodeMap.end())
+					{
+						target_nodes.push_back(node->second);
+					}
+				}
+				if (target_nodes.empty())
+					continue; // the target is not exported as a node (it was removed, or it has no transform)
 
 				if (channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
 					continue;
@@ -5191,18 +5294,45 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				if (data == nullptr || data->keyframe_times.empty() || data->keyframe_data.size() < components)
 					continue; // nothing to export (glTF accessors can't be empty)
 
+				// The keys as they are written, when they differ from the animation data:
+				bool own_values = false;
+				wi::vector<float> values;
+				const bool other_scene = &data_scene != &wiscene;
 				const bool retargeted = channel.path != Path::WEIGHTS && channel.retargetIndex >= 0 && channel.retargetIndex < (int)animation.retargets.size();
-				if (!retargeted && &data_scene != &wiscene)
-					continue; // the keys of an other scene are not in the glTF space
-
-				int sampler_index = -1;
 				if (retargeted)
 				{
-					// Each retargeted channel has its own baked keys:
+					values = data->keyframe_data;
+					own_values = true;
 					const AnimationComponent::RetargetSourceData& retarget = animation.retargets[channel.retargetIndex];
-					wi::vector<float> values = data->keyframe_data;
-					bake_retarget(retarget, data_scene.transforms.GetComponent(retarget.source), channel.path, values);
+					const TransformComponent* source = data_scene.transforms.GetComponent(retarget.source);
+					if (source != nullptr)
+					{
+						bake_retarget(retarget, *source, channel.path, sampler.mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE, values);
+					}
+					else if (other_scene)
+					{
+						mirror_keys(channel.path, values); // without the source transform the keys are played as they are
+					}
+				}
+				else if (other_scene && channel.path != Path::WEIGHTS)
+				{
+					values = data->keyframe_data;
+					own_values = true;
+					mirror_keys(channel.path, values);
+				}
+				if (channel.path == Path::ROTATION && wiscene.lights.Contains(channel.target))
+				{
+					if (!own_values)
+					{
+						values = data->keyframe_data;
+						own_values = true;
+					}
+					flip_light_keys(values);
+				}
 
+				int sampler_index = -1;
+				if (own_values)
+				{
 					tinygltf::AnimationSampler sampler_builder;
 					sampler_builder.input = get_input_accessor(sampler.data, *data);
 					sampler_builder.output = write_accessor(values, type);
@@ -5230,11 +5360,26 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					}
 				}
 
-				tinygltf::AnimationChannel channel_builder;
-				channel_builder.target_node = node->second;
-				channel_builder.sampler = sampler_index;
-				channel_builder.target_path = target_path;
-				animation_builder.channels.push_back(channel_builder);
+				for (int target_node : target_nodes)
+				{
+					tinygltf::AnimationChannel channel_builder;
+					channel_builder.target_node = target_node;
+					channel_builder.sampler = sampler_index;
+					channel_builder.target_path = target_path;
+
+					// glTF allows one channel for a path of a node, the engine applies the channels in order, so the last one is kept:
+					const uint64_t target_key = (uint64_t(target_node) << 8) | uint64_t(channel.path);
+					auto existing = target_channels.find(target_key);
+					if (existing != target_channels.end())
+					{
+						animation_builder.channels[existing->second] = channel_builder;
+					}
+					else
+					{
+						target_channels[target_key] = animation_builder.channels.size();
+						animation_builder.channels.push_back(channel_builder);
+					}
+				}
 			}
 
 			if (animation_builder.channels.empty())
@@ -5291,5 +5436,6 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 	assert(res);
 	// Restore scene world orientation
 	FlipZAxis(state);
+	UndoFlipZAxisSplits(wiscene, state.flip_splits);
 	wiscene.Update(0.f);
 }

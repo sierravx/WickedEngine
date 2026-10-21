@@ -2,6 +2,25 @@
 #include "wiScene.h"
 #include "wiUnorderedSet.h"
 
+// The animation data that FlipZAxisTransforms() split, which UndoFlipZAxisSplits() puts back
+struct FlipZAxisSplits
+{
+	struct Channel
+	{
+		wi::ecs::Entity animation = wi::ecs::INVALID_ENTITY;
+		size_t channel = 0;
+		int samplerIndex = -1; // the original sampler of the channel
+	};
+	wi::vector<Channel> channels;
+	struct Samplers
+	{
+		wi::ecs::Entity animation = wi::ecs::INVALID_ENTITY;
+		size_t count = 0; // the original sampler count of the animation
+	};
+	wi::vector<Samplers> samplers;
+	wi::vector<wi::ecs::Entity> datas; // the copied animation datas
+};
+
 // Mirrors the transforms, inverse bind matrices and animation keys of a scene along the Z axis, shared by the model importers
 //	to convert between the right handed space of the model files and the left handed space of the engine (the mesh data is flipped by the importers).
 //	The transforms are mirrored in local space: translation Z, rotation X and rotation Y are negated and the scale is unchanged.
@@ -13,8 +32,9 @@
 //	or a half turn about the Y axis (this is asserted for the root's local matrix in debug builds).
 //	The matrices of retargeted animations are mirrored so that they are evaluated in the mirrored space.
 //	Animation data used by channels that are mirrored differently is split first, so that each one can be mirrored.
-//	Calling it a second time restores the original state (except that such data stays split).
-inline void FlipZAxisTransforms(wi::scene::Scene& scene, wi::ecs::Entity rootEntity)
+//	Calling it a second time restores the original state, except that such data stays split (the animation plays the same).
+//	The splitting is recorded in splits (if given), and UndoFlipZAxisSplits() can undo it after flipping back.
+inline void FlipZAxisTransforms(wi::scene::Scene& scene, wi::ecs::Entity rootEntity, FlipZAxisSplits* splits = nullptr)
 {
 	// F * M * F with F = scale(1, 1, -1) negates the elements where exactly one of the row and the column is Z:
 	auto mirror = [](XMFLOAT4X4& m) {
@@ -77,17 +97,24 @@ inline void FlipZAxisTransforms(wi::scene::Scene& scene, wi::ecs::Entity rootEnt
 	for (size_t i = 0; i < scene.animations.GetCount(); ++i)
 	{
 		auto& animation = scene.animations[i];
-		wi::vector<uint8_t> mirrored_retargets(animation.retargets.size(), 0);
+		wi::vector<uint8_t> mirrored_retargets(animation.retargets.size(), 0); // 1: source in this scene, 2: in an other scene
 		for (const auto& channel : animation.channels)
 		{
-			if (channel.retargetIndex < 0 || channel.retargetIndex >= (int)animation.retargets.size() || mirrored_retargets[channel.retargetIndex] != 0)
+			if (channel.retargetIndex < 0 || channel.retargetIndex >= (int)animation.retargets.size())
 				continue;
 			if (channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
 				continue;
-			mirrored_retargets[channel.retargetIndex] = 1;
-			auto& retarget = animation.retargets[channel.retargetIndex];
 			const void* source_scene = animation.samplers[channel.samplerIndex].scene;
-			if (source_scene == nullptr || source_scene == &scene)
+			const uint8_t source_kind = (source_scene == nullptr || source_scene == &scene) ? 1 : 2;
+			if (mirrored_retargets[channel.retargetIndex] != 0)
+			{
+				// Scene::RetargetAnimation() gives each channel its own retarget, a shared one must have one source scene:
+				assert(mirrored_retargets[channel.retargetIndex] == source_kind);
+				continue;
+			}
+			mirrored_retargets[channel.retargetIndex] = source_kind;
+			auto& retarget = animation.retargets[channel.retargetIndex];
+			if (source_kind == 1)
 			{
 				mirror(retarget.dstRelativeMatrix);
 				mirror(retarget.srcRelativeParentMatrix);
@@ -139,9 +166,12 @@ inline void FlipZAxisTransforms(wi::scene::Scene& scene, wi::ecs::Entity rootEnt
 	for (size_t i = 0; i < scene.animations.GetCount(); ++i)
 	{
 		auto& animation = scene.animations[i];
+		const wi::ecs::Entity animationEntity = scene.animations.GetEntity(i);
+		const size_t sampler_count = animation.samplers.size();
 		wi::unordered_map<uint64_t, int> split_samplers; // sampler index and mirroring -> sampler of the copied data
-		for (auto& channel : animation.channels)
+		for (size_t channel_index = 0; channel_index < animation.channels.size(); ++channel_index)
 		{
+			auto& channel = animation.channels[channel_index];
 			const wi::ecs::Entity dataEntity = channel_data(animation, channel);
 			if (dataEntity == wi::ecs::INVALID_ENTITY)
 				continue;
@@ -160,12 +190,24 @@ inline void FlipZAxisTransforms(wi::scene::Scene& scene, wi::ecs::Entity rootEnt
 				const wi::scene::AnimationDataComponent copy = *scene.animation_datas.GetComponent(dataEntity);
 				const wi::ecs::Entity copyEntity = wi::ecs::CreateEntity();
 				scene.animation_datas.Create(copyEntity) = copy;
-				scene.Component_Attach(copyEntity, scene.animations.GetEntity(i));
+				scene.Component_Attach(copyEntity, animationEntity);
 
+				if (splits != nullptr)
+				{
+					if (split_samplers.empty())
+					{
+						splits->samplers.push_back({ animationEntity, sampler_count });
+					}
+					splits->datas.push_back(copyEntity);
+				}
 				wi::scene::AnimationComponent::AnimationSampler sampler = animation.samplers[channel.samplerIndex];
 				sampler.data = copyEntity;
 				animation.samplers.push_back(sampler);
 				split = split_samplers.insert({ key, int(animation.samplers.size() - 1) }).first;
+			}
+			if (splits != nullptr)
+			{
+				splits->channels.push_back({ animationEntity, channel_index, channel.samplerIndex });
 			}
 			channel.samplerIndex = split->second;
 		}
@@ -208,4 +250,30 @@ inline void FlipZAxisTransforms(wi::scene::Scene& scene, wi::ecs::Entity rootEnt
 			}
 		}
 	}
+}
+
+// Undoes the splitting of animation data recorded by FlipZAxisTransforms(), after flipping back.
+inline void UndoFlipZAxisSplits(wi::scene::Scene& scene, FlipZAxisSplits& splits)
+{
+	for (const FlipZAxisSplits::Channel& split : splits.channels)
+	{
+		wi::scene::AnimationComponent* animation = scene.animations.GetComponent(split.animation);
+		if (animation != nullptr && split.channel < animation->channels.size())
+		{
+			animation->channels[split.channel].samplerIndex = split.samplerIndex;
+		}
+	}
+	for (const FlipZAxisSplits::Samplers& split : splits.samplers)
+	{
+		wi::scene::AnimationComponent* animation = scene.animations.GetComponent(split.animation);
+		if (animation != nullptr && split.count <= animation->samplers.size())
+		{
+			animation->samplers.resize(split.count);
+		}
+	}
+	for (wi::ecs::Entity entity : splits.datas)
+	{
+		scene.Entity_Remove(entity);
+	}
+	splits = {};
 }
