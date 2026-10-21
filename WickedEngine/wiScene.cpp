@@ -4058,8 +4058,14 @@ namespace wi::scene
 				XMMATRIX W = XMLoadFloat4x4(&bone->world);
 				XMMATRIX M = B * W * R;
 
-				REBASE += wi::math::GetPosition(M);
-				rebase_count += 1.0f;
+				// A non-finite bone is left out of the rebase, because the rebase is applied to every bone and the object,
+				//	so it would make the whole mesh non-finite instead of only the vertices of that bone:
+				const XMVECTOR position = wi::math::GetPosition(M);
+				if (!XMVector3IsNaN(position) && !XMVector3IsInfinite(position))
+				{
+					REBASE += position;
+					rebase_count += 1.0f;
+				}
 
 				XMFLOAT4X4 mat;
 				XMStoreFloat4x4(&mat, M);
