@@ -199,27 +199,24 @@ namespace wi::math
 			// Axis a keeps its direction:
 			axis[a] = XMVector3Normalize(scale[a] < decompose_epsilon ? CanonicalAxis(a) : M.r[a]);
 
-			// The direction of an axis made perpendicular to axis a, or zero if it has no direction of its own:
-			auto perpendicular = [&](int i) {
+			// The direction of an axis made perpendicular to axis a, false if it has no direction of its own:
+			auto perpendicular = [&](int i, XMVECTOR& direction) {
 				if (scale[i] < decompose_epsilon)
-					return XMVectorZero();
-				XMVECTOR V = XMVector3Normalize(M.r[i]);
-				V = V - XMVector3Dot(V, axis[a]) * axis[a];
-				if (XMVectorGetX(XMVector3Length(V)) < decompose_epsilon)
-					return XMVectorZero();
-				return XMVector3Normalize(V);
-			};
-			auto has_direction = [](XMVECTOR V) {
-				return !XMVector3Equal(V, XMVectorZero());
+					return false;
+				direction = XMVector3Normalize(M.r[i]);
+				direction = direction - XMVector3Dot(direction, axis[a]) * axis[a];
+				if (XMVectorGetX(XMVector3Length(direction)) < decompose_epsilon)
+					return false;
+				direction = XMVector3Normalize(direction);
+				return true;
 			};
 
 			int first = b; // made perpendicular to axis a
 			int second = c; // the cross product
-			XMVECTOR direction = perpendicular(b);
-			if (!has_direction(direction))
+			XMVECTOR direction = XMVectorZero();
+			if (!perpendicular(b, direction))
 			{
-				direction = perpendicular(c);
-				if (has_direction(direction))
+				if (perpendicular(c, direction))
 				{
 					std::swap(first, second);
 				}
@@ -236,26 +233,24 @@ namespace wi::math
 			axis[first] = direction;
 			axis[second] = XMVector3Normalize(XMVector3Cross(axis[a], axis[first]));
 
-			// The cross product points to the same side as the original axis, or doesn't mirror the basis
-			//	when the original axis doesn't tell a side (zero length, or in the plane of the other two):
-			const float side = scale[second] < decompose_epsilon ? 0 : XMVectorGetX(XMVector3Dot(axis[second], M.r[second])) / scale[second];
-			if (side < -decompose_epsilon)
-			{
-				axis[second] = XMVectorNegate(axis[second]);
-			}
 			XMMATRIX basis;
 			basis.r[0] = XMVectorSetW(axis[0], 0);
 			basis.r[1] = XMVectorSetW(axis[1], 0);
 			basis.r[2] = XMVectorSetW(axis[2], 0);
 			basis.r[3] = g_XMIdentityR3;
-			if (std::abs(side) <= decompose_epsilon && XMVectorGetX(XMMatrixDeterminant(basis)) < 0)
-			{
-				axis[second] = XMVectorNegate(axis[second]);
-				basis.r[second] = XMVectorSetW(axis[second], 0);
-			}
 
-			if (XMVectorGetX(XMMatrixDeterminant(basis)) < 0)
+			// The cross product points to the same side as the original axis. When that doesn't tell a side (zero length,
+			//	or in the plane of the other two), the matrix is not mirrored, and the cross product is oriented to not mirror the basis:
+			const float side = scale[second] < decompose_epsilon ? 0 : XMVectorGetX(XMVector3Dot(axis[second], M.r[second])) / scale[second];
+			const bool mirrored_basis = XMVectorGetX(XMMatrixDeterminant(basis)) < 0;
+			const bool turn_second = std::abs(side) > decompose_epsilon ? side < 0 : mirrored_basis;
+			if (turn_second)
 			{
+				basis.r[second] = XMVectorNegate(basis.r[second]);
+			}
+			if (mirrored_basis != turn_second)
+			{
+				// The basis is mirrored: the mirroring is carried by the axis given as mirror
 				scale[mirror] = -scale[mirror];
 				basis.r[mirror] = XMVectorNegate(basis.r[mirror]);
 			}
