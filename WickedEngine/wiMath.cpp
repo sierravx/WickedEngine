@@ -203,11 +203,11 @@ namespace wi::math
 			auto perpendicular = [&](int i, XMVECTOR& direction) {
 				if (scale[i] < decompose_epsilon)
 					return false;
-				direction = XMVector3Normalize(M.r[i]);
-				direction = direction - XMVector3Dot(direction, axis[a]) * axis[a];
-				if (XMVectorGetX(XMVector3Length(direction)) < decompose_epsilon)
+				XMVECTOR V = XMVector3Normalize(M.r[i]);
+				V = V - XMVector3Dot(V, axis[a]) * axis[a];
+				if (XMVectorGetX(XMVector3Length(V)) < decompose_epsilon)
 					return false;
-				direction = XMVector3Normalize(direction);
+				direction = XMVector3Normalize(V); // (written only when there is a direction)
 				return true;
 			};
 

@@ -477,7 +477,15 @@ namespace
 				return -1;
 			};
 			Check(sampler_of("CubicDestination") >= 0 && sampler_of("CubicDestination") == sampler_of("CubicDestinationCopy"), "the same sampler and retarget were baked twice");
+			// With rigid retarget matrices the retargeting is qD * q * qP (in the order of XMQuaternionMultiply), as either quaternion
 			const wi::vector<float> linear = find_values("LinearRotationDestination", "rotation");
+			bool linear_retargeted = linear.size() == 8;
+			for (size_t key = 0; linear_retargeted && key < 2; ++key)
+			{
+				const XMVECTOR expected = XMQuaternionMultiply(XMQuaternionMultiply(qD, XMLoadFloat4((const XMFLOAT4*)&linear_rotation_keys[key * 4])), qP);
+				linear_retargeted = std::abs(std::abs(XMVectorGetX(XMVector4Dot(MirrorRotation(XMLoadFloat4((const XMFLOAT4*)&linear[key * 4])), expected))) - 1) < 1e-4f;
+			}
+			Check(linear_retargeted, "baked linear rotation keys are not the retargeted rotations");
 			Check(linear.size() == 8 && XMVectorGetX(XMVector4Dot(XMLoadFloat4((const XMFLOAT4*)&linear[0]), XMLoadFloat4((const XMFLOAT4*)&linear[4]))) > 0, "baked linear rotation keys are not in the same hemisphere");
 		}
 		Check(Near(find_values("CubicDestination", "translation"), expected_cubic_translation, 1e-3f), "the tangents of a retargeted cubic spline translation were not baked as derivatives");
@@ -527,6 +535,83 @@ namespace
 				return -1;
 			};
 			Check(output_of("Light") >= 0 && output_of("Light") == output_of("SecondLight"), "the same changed keys of two lights were written twice");
+		}
+
+		// Import: a glTF sampler that animates the rotation of a light node and of an other node. The light's keys get the
+		//	rotation of the light (glTF lights point forward, engine lights down), the other node's keys must not
+		{
+			const XMVECTOR qa = XMQuaternionRotationRollPitchYaw(0.2f, 0.4f, 0.1f);
+			const XMVECTOR qb = XMQuaternionRotationRollPitchYaw(-0.3f, 0.1f, 0.5f);
+			float buffer[10] = { 0, 1 };
+			XMStoreFloat4((XMFLOAT4*)&buffer[2], qa);
+			XMStoreFloat4((XMFLOAT4*)&buffer[6], qb);
+			const char* shared_file = "GLTFImportTest_shared.gltf";
+			const char* shared_bin = "GLTFImportTest_shared.bin";
+			FILE* bin = fopen(shared_bin, "wb");
+			if (bin != nullptr)
+			{
+				fwrite(buffer, sizeof(buffer), 1, bin);
+				fclose(bin);
+			}
+			FILE* gltf = fopen(shared_file, "w");
+			if (gltf != nullptr)
+			{
+				fputs(R"({
+	"asset": { "version": "2.0" },
+	"extensionsUsed": [ "KHR_lights_punctual" ],
+	"extensions": { "KHR_lights_punctual": { "lights": [ { "type": "point", "name": "SharedLight" } ] } },
+	"scene": 0,
+	"scenes": [ { "nodes": [ 0, 1 ] } ],
+	"nodes": [ { "name": "SharedLight", "extensions": { "KHR_lights_punctual": { "light": 0 } } }, { "name": "SharedNode" } ],
+	"buffers": [ { "byteLength": 40, "uri": "GLTFImportTest_shared.bin" } ],
+	"bufferViews": [ { "buffer": 0, "byteOffset": 0, "byteLength": 8 }, { "buffer": 0, "byteOffset": 8, "byteLength": 32 } ],
+	"accessors": [
+		{ "bufferView": 0, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [ 0 ], "max": [ 1 ] },
+		{ "bufferView": 1, "componentType": 5126, "count": 2, "type": "VEC4" }
+	],
+	"animations": [ {
+		"samplers": [ { "input": 0, "output": 1 } ],
+		"channels": [ { "sampler": 0, "target": { "node": 0, "path": "rotation" } }, { "sampler": 0, "target": { "node": 1, "path": "rotation" } } ]
+	} ]
+})", gltf);
+				fclose(gltf);
+			}
+
+			Scene shared;
+			ImportModel_GLTF(shared_file, shared);
+			std::remove(shared_file);
+			std::remove(shared_bin);
+
+			const Entity shared_light = shared.Entity_FindByName("SharedLight");
+			const Entity shared_node = shared.Entity_FindByName("SharedNode");
+			const AnimationDataComponent* light_data = nullptr;
+			const AnimationDataComponent* node_data = nullptr;
+			for (size_t i = 0; i < shared.animations.GetCount(); ++i)
+			{
+				const AnimationComponent& animation = shared.animations[i];
+				for (const AnimationComponent::AnimationChannel& channel : animation.channels)
+				{
+					if (channel.path != Path::ROTATION || channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
+						continue;
+					const AnimationDataComponent* data = shared.animation_datas.GetComponent(animation.samplers[channel.samplerIndex].data);
+					if (channel.target == shared_light)
+						light_data = data;
+					if (channel.target == shared_node)
+						node_data = data;
+				}
+			}
+			// In the engine space, which the import mirrors to:
+			const XMVECTOR light_rotation = XMQuaternionRotationRollPitchYaw(XM_PIDIV2, 0, 0);
+			auto keys_of = [](const AnimationDataComponent* data, size_t key) { return XMLoadFloat4((const XMFLOAT4*)&data->keyframe_data[key * 4]); };
+			auto same_rotation = [](XMVECTOR a, XMVECTOR b) { return std::abs(std::abs(XMVectorGetX(XMVector4Dot(a, b))) - 1) < 1e-4f; };
+			const bool found = shared.lights.Contains(shared_light) && light_data != nullptr && node_data != nullptr && light_data != node_data &&
+				light_data->keyframe_data.size() == 8 && node_data->keyframe_data.size() == 8;
+			Check(found, "a sampler shared by a light and an other node did not import as two datas");
+			if (found)
+			{
+				Check(same_rotation(keys_of(node_data, 0), MirrorRotation(qa)) && same_rotation(keys_of(node_data, 1), MirrorRotation(qb)), "the keys of a node were rotated like the keys of a light sharing their sampler");
+				Check(same_rotation(keys_of(light_data, 0), MirrorRotation(XMQuaternionMultiply(light_rotation, qa))) && same_rotation(keys_of(light_data, 1), MirrorRotation(XMQuaternionMultiply(light_rotation, qb))), "the keys of a light sharing a sampler with an other node did not get the light's rotation");
+			}
 		}
 
 		if (failures > 0)

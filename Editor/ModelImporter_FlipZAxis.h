@@ -39,9 +39,9 @@ inline void RotateRotationKeys(XMVECTOR rotation, wi::vector<float>& keys)
 inline int CopySamplerData(wi::scene::Scene& scene, wi::ecs::Entity animationEntity, wi::scene::AnimationComponent& animation, int samplerIndex, wi::ecs::Entity* copyEntity = nullptr)
 {
 	const wi::scene::AnimationComponent::AnimationSampler sampler = animation.samplers[samplerIndex];
-	const wi::scene::AnimationDataComponent copy = *scene.animation_datas.GetComponent(sampler.data);
+	wi::scene::AnimationDataComponent copy = *scene.animation_datas.GetComponent(sampler.data); // (copied before creating, which can move the components)
 	const wi::ecs::Entity entity = wi::ecs::CreateEntity();
-	scene.animation_datas.Create(entity) = copy;
+	scene.animation_datas.Create(entity) = std::move(copy);
 	scene.Component_Attach(entity, animationEntity);
 	animation.samplers.push_back(sampler);
 	animation.samplers.back().data = entity;

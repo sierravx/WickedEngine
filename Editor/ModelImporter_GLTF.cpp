@@ -9,6 +9,9 @@
 #include <wiHelper.h>
 #include <wiUnorderedSet.h>
 
+#include <map>
+#include <tuple>
+
 #define TINYGLTF_IMPLEMENTATION
 #define TINYGLTF_NO_STB_IMAGE
 #define TINYGLTF_NO_STB_IMAGE_WRITE
@@ -5232,22 +5235,21 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			KEYS_MIRRORED = 1 << 0, // keys of an other scene, which is not mirrored to the glTF space with this scene
 			KEYS_LIGHT_FLIP = 1 << 1, // rotation keys of a light node
 		};
-		wi::unordered_map<const Scene*, wi::unordered_map<Entity, int>> input_accessors; // data -> keyframe times
-		wi::unordered_map<const Scene*, wi::unordered_map<uint64_t, int>> output_accessors; // data, path, accessor type and changes -> keyframe values
+		std::map<std::pair<const Scene*, Entity>, int> input_accessors; // data -> keyframe times
+		std::map<std::tuple<const Scene*, Entity, Path, uint32_t>, int> output_accessors; // data, path and changes -> keyframe values
 		auto get_input_accessor = [&](const Scene* data_scene, Entity dataEntity, const AnimationDataComponent& data) {
-			auto& accessors = input_accessors[data_scene];
-			auto it = accessors.find(dataEntity);
-			if (it != accessors.end())
+			const auto key = std::make_pair(data_scene, dataEntity);
+			auto it = input_accessors.find(key);
+			if (it != input_accessors.end())
 				return it->second;
 			const int accessor = write_accessor(data.keyframe_times, TINYGLTF_TYPE_SCALAR);
-			accessors[dataEntity] = accessor;
+			input_accessors[key] = accessor;
 			return accessor;
 		};
 		auto get_output_accessor = [&](const Scene* data_scene, Entity dataEntity, const AnimationDataComponent& data, Path path, int type, uint32_t changes) {
-			auto& accessors = output_accessors[data_scene];
-			const uint64_t key = (uint64_t(dataEntity) << 24) | (uint64_t(path) << 16) | (uint64_t(type) << 8) | uint64_t(changes);
-			auto it = accessors.find(key);
-			if (it != accessors.end())
+			const auto key = std::make_tuple(data_scene, dataEntity, path, changes); // (the accessor type follows from the path)
+			auto it = output_accessors.find(key);
+			if (it != output_accessors.end())
 				return it->second;
 			int accessor = -1;
 			if (changes == KEYS_AS_THEY_ARE)
@@ -5267,7 +5269,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				}
 				accessor = write_accessor(values, type);
 			}
-			accessors[key] = accessor;
+			output_accessors[key] = accessor;
 			return accessor;
 		};
 
@@ -5403,8 +5405,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				}
 			}
 
-			wi::unordered_map<uint64_t, int> sampler_remap; // sampler index, path, accessor type and key changes -> glTF sampler index, for keys that are not baked
-			wi::unordered_map<uint64_t, int> baked_samplers; // sampler index, retarget, path and key changes -> glTF sampler index
+			std::map<std::tuple<int, int, Path, uint32_t>, int> made_samplers; // sampler index, retarget (for baked keys, else -1), path and key changes -> glTF sampler index
 			for (size_t channel_index = 0; channel_index < animation.channels.size(); ++channel_index)
 			{
 				const AnimationComponent::AnimationChannel& channel = animation.channels[channel_index];
@@ -5423,18 +5424,20 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					continue; // a later channel animates the same
 
 				const AnimationComponent::AnimationSampler& sampler = animation.samplers[channel.samplerIndex];
+				const auto sampler_key = std::make_tuple(channel.samplerIndex, exported.baked ? channel.retargetIndex : -1, channel.path, exported.changes);
 				int sampler_index = -1;
-				if (exported.baked)
+				auto made = made_samplers.find(sampler_key);
+				if (made != made_samplers.end())
 				{
-					// The keys are baked for each sampler and retarget:
-					const uint64_t baked_key = (uint64_t(channel.samplerIndex) << 32) | (uint64_t(channel.retargetIndex) << 12) | (uint64_t(channel.path) << 4) | uint64_t(exported.changes);
-					auto baked = baked_samplers.find(baked_key);
-					if (baked != baked_samplers.end())
+					sampler_index = made->second;
+				}
+				else
+				{
+					tinygltf::AnimationSampler sampler_builder;
+					sampler_builder.input = get_input_accessor(exported.data_scene, sampler.data, *exported.data);
+					if (exported.baked)
 					{
-						sampler_index = baked->second;
-					}
-					else
-					{
+						// The keys are baked for each sampler and retarget:
 						const AnimationComponent::RetargetSourceData& retarget = animation.retargets[channel.retargetIndex];
 						wi::vector<float> values = exported.data->keyframe_data;
 						bake_retarget(retarget, *exported.data_scene->transforms.GetComponent(retarget.source), channel.path, sampler.mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE, values);
@@ -5442,34 +5445,16 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 						{
 							RotateRotationKeys(light_forward_flip, values);
 						}
-
-						tinygltf::AnimationSampler sampler_builder;
-						sampler_builder.input = get_input_accessor(exported.data_scene, sampler.data, *exported.data);
 						sampler_builder.output = write_accessor(values, exported.type);
-						sampler_builder.interpolation = interpolation(sampler.mode);
-						sampler_index = (int)animation_builder.samplers.size();
-						animation_builder.samplers.push_back(sampler_builder);
-						baked_samplers[baked_key] = sampler_index;
-					}
-				}
-				else
-				{
-					const uint64_t sampler_key = (uint64_t(channel.samplerIndex) << 24) | (uint64_t(channel.path) << 16) | (uint64_t(exported.type) << 8) | uint64_t(exported.changes);
-					auto remapped = sampler_remap.find(sampler_key);
-					if (remapped != sampler_remap.end())
-					{
-						sampler_index = remapped->second;
 					}
 					else
 					{
-						tinygltf::AnimationSampler sampler_builder;
-						sampler_builder.input = get_input_accessor(exported.data_scene, sampler.data, *exported.data);
 						sampler_builder.output = get_output_accessor(exported.data_scene, sampler.data, *exported.data, channel.path, exported.type, exported.changes);
-						sampler_builder.interpolation = interpolation(sampler.mode);
-						sampler_index = (int)animation_builder.samplers.size();
-						animation_builder.samplers.push_back(sampler_builder);
-						sampler_remap[sampler_key] = sampler_index;
 					}
+					sampler_builder.interpolation = interpolation(sampler.mode);
+					sampler_index = (int)animation_builder.samplers.size();
+					animation_builder.samplers.push_back(sampler_builder);
+					made_samplers[sampler_key] = sampler_index;
 				}
 
 				for (int node : nodes)
