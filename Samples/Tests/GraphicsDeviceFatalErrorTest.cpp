@@ -20,8 +20,11 @@ namespace
 	{
 		setenv("VK_ICD_FILENAMES", "/nonexistent/vulkan_icd.json", 1);
 		setenv("VK_DRIVER_FILES", "/nonexistent/vulkan_icd.json", 1);
-		unsetenv("DISPLAY"); // no error message box
+		unsetenv("VK_ADD_DRIVER_FILES");
+		// No error message box (Wayland clients also find the default display through XDG_RUNTIME_DIR):
+		unsetenv("DISPLAY");
 		unsetenv("WAYLAND_DISPLAY");
+		unsetenv("XDG_RUNTIME_DIR");
 
 		wi::jobsystem::Initialize();
 		wi::graphics::GraphicsDevice_Vulkan* device = new wi::graphics::GraphicsDevice_Vulkan(nullptr);

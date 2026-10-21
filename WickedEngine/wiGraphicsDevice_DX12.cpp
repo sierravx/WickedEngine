@@ -2992,10 +2992,11 @@ std::mutex queue_locker;
 		D3D12_DESCRIPTOR_HEAP_DESC nullHeapDesc = {};
 		nullHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 		nullHeapDesc.NumDescriptors = DESCRIPTORBINDER_CBV_COUNT + DESCRIPTORBINDER_SRV_COUNT + DESCRIPTORBINDER_UAV_COUNT;
-		dx12_check(device->CreateDescriptorHeap(&nullHeapDesc, PPV_ARGS(nulldescriptorheap_cbv_srv_uav)));
+		hr = dx12_check(device->CreateDescriptorHeap(&nullHeapDesc, PPV_ARGS(nulldescriptorheap_cbv_srv_uav)));
 		if (FAILED(hr))
 		{
 			wilog_messagebox("ID3D12Device::CreateDescriptorHeap[nulldescriptorheap_cbv_srv_uav] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
+			wi::platform::ExitFatal();
 		}
 
 		nullHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
@@ -3004,6 +3005,7 @@ std::mutex queue_locker;
 		if (FAILED(hr))
 		{
 			wilog_messagebox("ID3D12Device::CreateDescriptorHeap[nulldescriptorheap_sampler] failed! ERROR: %s", wi::helper::GetPlatformErrorString(hr).c_str());
+			wi::platform::ExitFatal();
 		}
 
 		nullCBV = nulldescriptorheap_cbv_srv_uav->GetCPUDescriptorHandleForHeapStart();
