@@ -5200,12 +5200,14 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			{
 				const XMVECTOR value = load(offset + value_offset);
 				const XMVECTOR result = retargeted(value);
-				// A decomposed rotation can come out as either of its two quaternions, the one is taken that keeps the
-				//	hemisphere relation of the source keys (the runtime interpolates them, then retargets):
+				// A decomposed rotation can come out as either of its two quaternions. For cubic splines, which interpolate
+				//	the quaternions as they are, the one is taken that keeps the hemisphere relation of the source keys (the runtime
+				//	interpolates them, then retargets); otherwise the one in the hemisphere of the previous key (the short way, as
+				//	the runtime's slerp goes):
 				float sign = 1;
 				if (path == Path::ROTATION && offset > 0)
 				{
-					const bool source_flips = XMVectorGetX(XMVector4Dot(value, previous_value)) < 0;
+					const bool source_flips = cubic && XMVectorGetX(XMVector4Dot(value, previous_value)) < 0;
 					const bool result_flips = XMVectorGetX(XMVector4Dot(result, previous_result)) < 0;
 					sign = source_flips == result_flips ? 1.0f : -1.0f;
 				}
@@ -5220,15 +5222,8 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			}
 		};
 
-		// Light nodes are written with a forward flip in their rotation (see the nodes above), their rotation keys get it too.
-		//	It is a constant rotation multiplied with every key, which also applies to the tangents of cubic spline keys:
+		// Light nodes are written with a forward flip in their rotation (see the nodes above), their rotation keys get it too:
 		const XMVECTOR light_forward_flip = XMQuaternionRotationRollPitchYaw(-XM_PIDIV2, 0, 0);
-		auto flip_light_keys = [&](wi::vector<float>& values) {
-			for (size_t i = 0; i + 4 <= values.size(); i += 4)
-			{
-				XMStoreFloat4((XMFLOAT4*)&values[i], XMQuaternionMultiply(light_forward_flip, XMLoadFloat4((const XMFLOAT4*)&values[i])));
-			}
-		};
 
 		// The keys of a channel are written as they are, or with these changes. The same data with the same changes shares accessors:
 		enum KeyChanges : uint32_t
@@ -5238,7 +5233,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			KEYS_LIGHT_FLIP = 1 << 1, // rotation keys of a light node
 		};
 		wi::unordered_map<const Scene*, wi::unordered_map<Entity, int>> input_accessors; // data -> keyframe times
-		wi::unordered_map<const Scene*, wi::unordered_map<uint64_t, int>> output_accessors; // data, accessor type and changes -> keyframe values
+		wi::unordered_map<const Scene*, wi::unordered_map<uint64_t, int>> output_accessors; // data, path, accessor type and changes -> keyframe values
 		auto get_input_accessor = [&](const Scene* data_scene, Entity dataEntity, const AnimationDataComponent& data) {
 			auto& accessors = input_accessors[data_scene];
 			auto it = accessors.find(dataEntity);
@@ -5250,7 +5245,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		};
 		auto get_output_accessor = [&](const Scene* data_scene, Entity dataEntity, const AnimationDataComponent& data, Path path, int type, uint32_t changes) {
 			auto& accessors = output_accessors[data_scene];
-			const uint64_t key = (uint64_t(dataEntity) << 16) | (uint64_t(type) << 8) | uint64_t(changes);
+			const uint64_t key = (uint64_t(dataEntity) << 24) | (uint64_t(path) << 16) | (uint64_t(type) << 8) | uint64_t(changes);
 			auto it = accessors.find(key);
 			if (it != accessors.end())
 				return it->second;
@@ -5268,7 +5263,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				}
 				if (changes & KEYS_LIGHT_FLIP)
 				{
-					flip_light_keys(values);
+					RotateRotationKeys(light_forward_flip, values);
 				}
 				accessor = write_accessor(values, type);
 			}
@@ -5369,7 +5364,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			{
 				exported.baked = true;
 			}
-			else if (other_scene)
+			else if (other_scene && (channel.path == Path::TRANSLATION || channel.path == Path::ROTATION))
 			{
 				exported.changes |= KEYS_MIRRORED; // without the source transform, retargeted keys are played as they are
 			}
@@ -5408,7 +5403,8 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				}
 			}
 
-			wi::unordered_map<int, int> sampler_remap; // sampler index, accessor type and key changes -> glTF sampler index, for keys that are not baked
+			wi::unordered_map<uint64_t, int> sampler_remap; // sampler index, path, accessor type and key changes -> glTF sampler index, for keys that are not baked
+			wi::unordered_map<uint64_t, int> baked_samplers; // sampler index, retarget, path and key changes -> glTF sampler index
 			for (size_t channel_index = 0; channel_index < animation.channels.size(); ++channel_index)
 			{
 				const AnimationComponent::AnimationChannel& channel = animation.channels[channel_index];
@@ -5430,25 +5426,35 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				int sampler_index = -1;
 				if (exported.baked)
 				{
-					// Each retargeted channel has its own baked keys:
-					const AnimationComponent::RetargetSourceData& retarget = animation.retargets[channel.retargetIndex];
-					wi::vector<float> values = exported.data->keyframe_data;
-					bake_retarget(retarget, *exported.data_scene->transforms.GetComponent(retarget.source), channel.path, sampler.mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE, values);
-					if (exported.changes & KEYS_LIGHT_FLIP)
+					// The keys are baked for each sampler and retarget:
+					const uint64_t baked_key = (uint64_t(channel.samplerIndex) << 32) | (uint64_t(channel.retargetIndex) << 12) | (uint64_t(channel.path) << 4) | uint64_t(exported.changes);
+					auto baked = baked_samplers.find(baked_key);
+					if (baked != baked_samplers.end())
 					{
-						flip_light_keys(values);
+						sampler_index = baked->second;
 					}
+					else
+					{
+						const AnimationComponent::RetargetSourceData& retarget = animation.retargets[channel.retargetIndex];
+						wi::vector<float> values = exported.data->keyframe_data;
+						bake_retarget(retarget, *exported.data_scene->transforms.GetComponent(retarget.source), channel.path, sampler.mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE, values);
+						if (exported.changes & KEYS_LIGHT_FLIP)
+						{
+							RotateRotationKeys(light_forward_flip, values);
+						}
 
-					tinygltf::AnimationSampler sampler_builder;
-					sampler_builder.input = get_input_accessor(exported.data_scene, sampler.data, *exported.data);
-					sampler_builder.output = write_accessor(values, exported.type);
-					sampler_builder.interpolation = interpolation(sampler.mode);
-					sampler_index = (int)animation_builder.samplers.size();
-					animation_builder.samplers.push_back(sampler_builder);
+						tinygltf::AnimationSampler sampler_builder;
+						sampler_builder.input = get_input_accessor(exported.data_scene, sampler.data, *exported.data);
+						sampler_builder.output = write_accessor(values, exported.type);
+						sampler_builder.interpolation = interpolation(sampler.mode);
+						sampler_index = (int)animation_builder.samplers.size();
+						animation_builder.samplers.push_back(sampler_builder);
+						baked_samplers[baked_key] = sampler_index;
+					}
 				}
 				else
 				{
-					const int sampler_key = (channel.samplerIndex << 16) | (exported.type << 8) | int(exported.changes);
+					const uint64_t sampler_key = (uint64_t(channel.samplerIndex) << 24) | (uint64_t(channel.path) << 16) | (uint64_t(exported.type) << 8) | uint64_t(exported.changes);
 					auto remapped = sampler_remap.find(sampler_key);
 					if (remapped != sampler_remap.end())
 					{

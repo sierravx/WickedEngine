@@ -169,6 +169,12 @@ namespace
 		scene.lights.Create(light).SetType(LightComponent::SPOT);
 		Entity second_light = CreateNode(scene, "SecondLight", XMFLOAT3(0, 6, 0));
 		scene.lights.Create(second_light).SetType(LightComponent::POINT);
+		// The first light under a node that comes after the second light: the import meets the lights in the other order
+		Entity light_parent = CreateNode(scene, "LightParent", XMFLOAT3(0, 0, 0));
+		scene.Component_Attach(light, light_parent, true);
+		Entity c = CreateNode(scene, "C", XMFLOAT3(2, 0, 0));
+		Entity cubic_destination_copy = CreateNode(scene, "CubicDestinationCopy", XMFLOAT3(1, 2, 1));
+		Entity linear_rotation_destination = CreateNode(scene, "LinearRotationDestination", XMFLOAT3(1, 2, 2));
 
 		// Meshes with a morph target, the weights of which can be animated (the first one has two objects)
 		Entity material = CreateEntity();
@@ -208,6 +214,11 @@ namespace
 		Entity light_data = CreateData(scene, times, light_keys);
 		Entity empty_data = CreateData(scene, {}, {});
 		Entity other_data = CreateData(other, times, retarget_keys);
+		Entity other_shared_data = CreateData(other, times, shared_keys);
+		const wi::vector<float> linear_rotation_keys = {
+			XMVectorGetX(q0), XMVectorGetY(q0), XMVectorGetZ(q0), XMVectorGetW(q0), XMVectorGetX(q1), XMVectorGetY(q1), XMVectorGetZ(q1), XMVectorGetW(q1),
+		};
+		Entity linear_rotation_data = CreateData(scene, times, linear_rotation_keys);
 		// An other scene can have data on the same entity as this scene (when entities are not remapped):
 		const wi::vector<float> other_weight_keys = { 0.3f, 0.7f };
 		const Entity other_weight_data = weight_data;
@@ -261,7 +272,14 @@ namespace
 			add_channel(destination, add_sampler(retarget_data), Path::TRANSLATION, add_retarget(source)); // baked
 			add_channel(other_destination, add_sampler(other_data, &other), Path::TRANSLATION, add_retarget(other_source)); // baked
 			add_channel(a, add_sampler(last_translation_data), Path::TRANSLATION); // the last channel of A is exported
-			add_channel(cubic_destination, add_sampler(cubic_translation_data, nullptr, cubic), Path::TRANSLATION, add_retarget(source)); // baked with tangents
+			const int cubic_translation_sampler = add_sampler(cubic_translation_data, nullptr, cubic);
+			const int cubic_translation_retarget = add_retarget(source);
+			add_channel(cubic_destination, cubic_translation_sampler, Path::TRANSLATION, cubic_translation_retarget); // baked with tangents
+			add_channel(cubic_destination_copy, cubic_translation_sampler, Path::TRANSLATION, cubic_translation_retarget); // the same baked keys
+			add_channel(linear_rotation_destination, add_sampler(linear_rotation_data), Path::ROTATION, add_retarget(source)); // baked the short way
+			const int other_shared_sampler = add_sampler(other_shared_data, &other);
+			add_channel(c, other_shared_sampler, Path::TRANSLATION); // keys of an other scene, mirrored
+			add_channel(c, other_shared_sampler, Path::SCALE); // the same keys, not mirrored
 			add_channel(cubic_rotation_destination, add_sampler(cubic_rotation_data, nullptr, cubic), Path::ROTATION, add_retarget(source)); // baked with tangents
 			add_channel(missing_source_destination, add_sampler(other_data, &other), Path::TRANSLATION, add_retarget(no_transform)); // played as it is
 			add_channel(light, add_sampler(light_data), Path::ROTATION); // with the light's forward flip
@@ -361,7 +379,13 @@ namespace
 			}
 			return wi::vector<float>();
 		};
-		Check(imported.lights.GetCount() == 2 && imported.lights.Contains(imported.Entity_FindByName("Light")), "the lights did not import back");
+		{
+			const LightComponent* imported_light = imported.lights.GetComponent(imported.Entity_FindByName("Light"));
+			const LightComponent* imported_second_light = imported.lights.GetComponent(imported.Entity_FindByName("SecondLight"));
+			Check(imported.lights.GetCount() == 2 && imported_light != nullptr && imported_second_light != nullptr &&
+				imported_light->GetType() == LightComponent::SPOT && imported_second_light->GetType() == LightComponent::POINT,
+				"the lights did not import back as they were");
+		}
 		Check(Near(imported_keys("A", Path::TRANSLATION), last_translation_keys), "the translation keys did not import back as they were");
 		{
 			const wi::vector<float> keys = imported_keys("Light", Path::ROTATION);
@@ -387,7 +411,7 @@ namespace
 		if (model.animations.size() != 1)
 			return TEST_FAILED;
 		const tinygltf::Animation& exported = model.animations[0];
-		Check(exported.channels.size() == 13, "expected 13 exported channels, got " + std::to_string(exported.channels.size()));
+		Check(exported.channels.size() == 17, "expected 17 exported channels, got " + std::to_string(exported.channels.size()));
 		{
 			wi::vector<uint8_t> used(exported.samplers.size(), 0);
 			for (const tinygltf::AnimationChannel& channel : exported.channels)
@@ -442,6 +466,20 @@ namespace
 		Check(Near(find_values("Destination", "translation"), expected_same), "the channel retargeted from this scene was not baked");
 		Check(Near(find_values("OtherDestination", "translation"), expected_other), "the channel retargeted from an other scene was not baked");
 		Check(Near(find_values("MissingSourceDestination", "translation"), MirrorTranslations(retarget_keys)), "the keys of an other scene without a retarget source were not exported mirrored");
+		Check(Near(find_values("C", "translation"), MirrorTranslations(shared_keys)) && Near(find_values("C", "scale"), shared_keys), "keys of an other scene used by a translation and a scale channel were not exported mirrored only for the translation");
+		{
+			auto sampler_of = [&](const std::string& name) {
+				for (const tinygltf::AnimationChannel& channel : exported.channels)
+				{
+					if (channel.target_node == node_index(name))
+						return channel.sampler;
+				}
+				return -1;
+			};
+			Check(sampler_of("CubicDestination") >= 0 && sampler_of("CubicDestination") == sampler_of("CubicDestinationCopy"), "the same sampler and retarget were baked twice");
+			const wi::vector<float> linear = find_values("LinearRotationDestination", "rotation");
+			Check(linear.size() == 8 && XMVectorGetX(XMVector4Dot(XMLoadFloat4((const XMFLOAT4*)&linear[0]), XMLoadFloat4((const XMFLOAT4*)&linear[4]))) > 0, "baked linear rotation keys are not in the same hemisphere");
+		}
 		Check(Near(find_values("CubicDestination", "translation"), expected_cubic_translation, 1e-3f), "the tangents of a retargeted cubic spline translation were not baked as derivatives");
 
 		// Cubic rotation: with rigid retarget matrices the retargeting is the linear qD * q * qP (in the order of XMQuaternionMultiply),
