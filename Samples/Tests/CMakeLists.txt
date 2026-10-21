@@ -70,6 +70,17 @@ if (UNIX AND NOT APPLE)
 	target_link_libraries(GraphicsDeviceFatalErrorTest PRIVATE WickedEngine)
 	add_test(NAME GraphicsDeviceFatalErrorTest COMMAND GraphicsDeviceFatalErrorTest)
 	set_target_properties(GraphicsDeviceFatalErrorTest PROPERTIES FOLDER "Tests")
+
+	# The editor's glTF exporter, it needs a Vulkan device (like Mesa's lavapipe) and is skipped without one
+	add_executable(GLTFExportTest
+		GLTFExportTest.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/../../Editor/ModelImporter_GLTF.cpp
+	)
+	target_include_directories(GLTFExportTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../Editor)
+	target_link_libraries(GLTFExportTest PRIVATE WickedEngine)
+	add_test(NAME GLTFExportTest COMMAND GLTFExportTest)
+	set_tests_properties(GLTFExportTest PROPERTIES SKIP_RETURN_CODE 77)
+	set_target_properties(GLTFExportTest PROPERTIES FOLDER "Tests")
 endif()
 
 

@@ -5030,153 +5030,222 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 	}
 
 	// Write Animations
-	wi::unordered_map<Entity, std::vector<size_t>> animation_datasets;
-	if(wiscene.animations.GetCount() > 0)
+	//	Only what glTF can hold is exported: the translation, rotation and scale of nodes, and the morph target weights of meshes.
+	//	Channels retargeted from an other animation without baking are baked here.
 	{
-		// Find accessor types first!
-		wi::unordered_map<Entity, size_t> animdata_vectype; 
-		for(size_t anim_id = 0; anim_id < wiscene.animations.GetCount(); ++anim_id)
-		{
-			auto& animation = wiscene.animations[anim_id];
-			for(auto& channel : animation.channels)
-			{
-				if(channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
-					continue;
-				if(animdata_vectype.find(animation.samplers[channel.samplerIndex].data) == animdata_vectype.end())
-					animdata_vectype[animation.samplers[channel.samplerIndex].data] = 
-						(channel.path == AnimationComponent::AnimationChannel::Path::SCALE) ? TINYGLTF_TYPE_VEC3 :
-						(channel.path == AnimationComponent::AnimationChannel::Path::ROTATION) ? TINYGLTF_TYPE_VEC4 :
-						(channel.path == AnimationComponent::AnimationChannel::Path::TRANSLATION) ? TINYGLTF_TYPE_VEC3 :
-						(channel.path == AnimationComponent::AnimationChannel::Path::WEIGHTS) ? TINYGLTF_TYPE_SCALAR : TINYGLTF_TYPE_SCALAR;
-			}
-		}
+		using Path = AnimationComponent::AnimationChannel::Path;
 
-		// Store animations into a single buffer
-		size_t buf_i = 0;
 		tinygltf::Buffer buffer_builder;
-		int buffer_index = (int)state.gltfModel.buffers.size();
-		for(size_t animdata_id = 0; animdata_id < wiscene.animation_datas.GetCount(); ++animdata_id)
-		{
-			auto& animdata = wiscene.animation_datas[animdata_id];
-			auto animdataEntity = wiscene.animation_datas.GetEntity(animdata_id);
+		size_t buf_i = 0;
+		const int buffer_index = (int)state.gltfModel.buffers.size();
 
-			size_t buf_d_ftime_offset, buf_d_ftime_size, 
-				buf_d_fdata_offset, buf_d_fdata_size;
-			buf_d_ftime_offset = buf_i;
-			for(auto& animdata_ftime : animdata.keyframe_times)
+		// Writes whole elements of the values into the animation buffer, with a bufferView and an accessor, returns the accessor index:
+		auto write_accessor = [&](const wi::vector<float>& values, int type) {
+			const size_t components = type == TINYGLTF_TYPE_VEC4 ? 4 : (type == TINYGLTF_TYPE_VEC3 ? 3 : 1);
+			const size_t count = values.size() / components;
+
+			tinygltf::BufferView bufferView_builder;
+			bufferView_builder.buffer = buffer_index;
+			bufferView_builder.byteOffset = buf_i;
+			for (size_t i = 0; i < count * components; ++i)
 			{
-				_ExportHelper_valuetobuf(animdata_ftime, buffer_builder, buf_i);
+				_ExportHelper_valuetobuf(values[i], buffer_builder, buf_i);
 			}
-			buf_d_ftime_size = buf_i - buf_d_ftime_offset;
+			bufferView_builder.byteLength = buf_i - bufferView_builder.byteOffset;
+			const int bufferView_index = (int)state.gltfModel.bufferViews.size();
+			state.gltfModel.bufferViews.push_back(bufferView_builder);
 
-			buf_d_fdata_offset = buf_i;
-			for(auto& animdata_fdata : animdata.keyframe_data)
+			tinygltf::Accessor accessor_builder;
+			accessor_builder.bufferView = bufferView_index;
+			accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
+			accessor_builder.count = count;
+			accessor_builder.type = type;
+			if (type == TINYGLTF_TYPE_SCALAR && count > 0)
 			{
-				_ExportHelper_valuetobuf(animdata_fdata, buffer_builder, buf_i);
+				// The keyframe times (animation sampler inputs) must have min and max, weights can also have them:
+				auto range = std::minmax_element(values.begin(), values.begin() + count);
+				accessor_builder.minValues = { *range.first };
+				accessor_builder.maxValues = { *range.second };
 			}
-			buf_d_fdata_size = buf_i - buf_d_fdata_offset;
+			const int accessor_index = (int)state.gltfModel.accessors.size();
+			state.gltfModel.accessors.push_back(accessor_builder);
+			return accessor_index;
+		};
 
-			tinygltf::BufferView ftime_bufferView_builder;
-			int ftime_bufferView_index = (int)state.gltfModel.bufferViews.size();
-			ftime_bufferView_builder.buffer = buffer_index;
-			ftime_bufferView_builder.byteOffset = buf_d_ftime_offset;
-			ftime_bufferView_builder.byteLength = buf_d_ftime_size;
-			// ftime_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
-			state.gltfModel.bufferViews.push_back(ftime_bufferView_builder);
+		// The accessors of animation data are shared by the samplers that use the same data:
+		wi::unordered_map<Entity, int> input_accessors; // data -> keyframe times
+		wi::unordered_map<uint64_t, int> output_accessors; // data and accessor type -> keyframe values
+		auto get_input_accessor = [&](Entity dataEntity, const AnimationDataComponent& data) {
+			auto it = input_accessors.find(dataEntity);
+			if (it != input_accessors.end())
+				return it->second;
+			const int accessor = write_accessor(data.keyframe_times, TINYGLTF_TYPE_SCALAR);
+			input_accessors[dataEntity] = accessor;
+			return accessor;
+		};
+		auto get_output_accessor = [&](Entity dataEntity, const AnimationDataComponent& data, int type) {
+			const uint64_t key = (uint64_t(dataEntity) << 8) | uint64_t(type);
+			auto it = output_accessors.find(key);
+			if (it != output_accessors.end())
+				return it->second;
+			const int accessor = write_accessor(data.keyframe_data, type);
+			output_accessors[key] = accessor;
+			return accessor;
+		};
 
-			tinygltf::Accessor ftime_accessor_builder;
-			int ftime_accessor_index = (int)state.gltfModel.accessors.size();
-			ftime_accessor_builder.bufferView = ftime_bufferView_index;
-			ftime_accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
-			ftime_accessor_builder.count = animdata.keyframe_times.size();
-			ftime_accessor_builder.type = TINYGLTF_TYPE_SCALAR;
-			state.gltfModel.accessors.push_back(ftime_accessor_builder);
-
-			tinygltf::BufferView fdata_bufferView_builder;
-			int fdata_bufferView_index = (int)state.gltfModel.bufferViews.size();
-			fdata_bufferView_builder.buffer = buffer_index;
-			fdata_bufferView_builder.byteOffset = buf_d_fdata_offset;
-			fdata_bufferView_builder.byteLength = buf_d_fdata_size;
-			// fdata_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
-			state.gltfModel.bufferViews.push_back(fdata_bufferView_builder);
-
-			int anim_vectype = TINYGLTF_TYPE_SCALAR;
-			size_t anim_sizedivider = 1;
-			auto find_animdata_vectype = animdata_vectype.find(animdataEntity);
-			if(find_animdata_vectype != animdata_vectype.end())
+		// A channel retargeted without baking is evaluated from the keys of the source animation at runtime, as
+		//	dstRelativeMatrix * source local transform * srcRelativeParentMatrix (see Scene::RunAnimationUpdateSystem()).
+		//	It is baked the same way as Scene::RetargetAnimation() bakes it (including the tangents of cubic spline keys):
+		auto bake_retarget = [](const AnimationComponent::RetargetSourceData& retarget, const TransformComponent* source, Path path, wi::vector<float>& values) {
+			if (source == nullptr)
+				return; // without the source transform, the keys are played as they are
+			const XMMATRIX dstRelativeMatrix = XMLoadFloat4x4(&retarget.dstRelativeMatrix);
+			const XMMATRIX srcRelativeParentMatrix = XMLoadFloat4x4(&retarget.srcRelativeParentMatrix);
+			const size_t components = path == Path::ROTATION ? 4 : 3;
+			for (size_t offset = 0; offset + components <= values.size(); offset += components)
 			{
-				anim_vectype = (int)find_animdata_vectype->second;
-				anim_sizedivider = (find_animdata_vectype->second == TINYGLTF_TYPE_SCALAR) ? 1 : find_animdata_vectype->second;
+				TransformComponent transform = *source;
+				if (path == Path::TRANSLATION)
+				{
+					transform.translation_local = XMFLOAT3(values[offset], values[offset + 1], values[offset + 2]);
+				}
+				else if (path == Path::ROTATION)
+				{
+					transform.rotation_local = XMFLOAT4(values[offset], values[offset + 1], values[offset + 2], values[offset + 3]);
+				}
+				else
+				{
+					transform.scale_local = XMFLOAT3(values[offset], values[offset + 1], values[offset + 2]);
+				}
+				XMVECTOR S, R, T;
+				wi::math::DecomposeTransform(&S, &R, &T, dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix);
+				const XMVECTOR V = path == Path::TRANSLATION ? T : (path == Path::ROTATION ? R : S);
+				for (size_t i = 0; i < components; ++i)
+				{
+					values[offset + i] = XMVectorGetByIndex(V, i);
+				}
+			}
+		};
+
+		auto interpolation = [](AnimationComponent::AnimationSampler::Mode mode) {
+			return
+				(mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE) ? "CUBICSPLINE" :
+				(mode == AnimationComponent::AnimationSampler::Mode::STEP) ? "STEP" : "LINEAR";
+		};
+
+		for (size_t anim_id = 0; anim_id < wiscene.animations.GetCount(); ++anim_id)
+		{
+			const AnimationComponent& animation = wiscene.animations[anim_id];
+
+			tinygltf::Animation animation_builder;
+
+			Entity entity = wiscene.animations.GetEntity(anim_id);
+			const NameComponent* name = wiscene.names.GetComponent(entity);
+			if (name != nullptr)
+			{
+				animation_builder.name = name->name;
 			}
 
-			tinygltf::Accessor fdata_accessor_builder;
-			int fdata_accessor_index = (int)state.gltfModel.accessors.size();
-			fdata_accessor_builder.bufferView = fdata_bufferView_index;
-			fdata_accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
-			fdata_accessor_builder.count = animdata.keyframe_data.size() / anim_sizedivider;
-			fdata_accessor_builder.type = anim_vectype;
-			state.gltfModel.accessors.push_back(fdata_accessor_builder);
+			wi::unordered_map<int, int> sampler_remap; // sampler index and accessor type -> glTF sampler index, for the channels that are not baked
+			for (const AnimationComponent::AnimationChannel& channel : animation.channels)
+			{
+				auto node = state.nodeMap.find(channel.target);
+				if (node == state.nodeMap.end())
+					continue; // the target is not exported as a node (it was removed, or it has no transform)
 
-			animation_datasets[animdataEntity] = {
-				(size_t)ftime_bufferView_index,
-				(size_t)ftime_accessor_index,
-				(size_t)fdata_bufferView_index,
-				(size_t)fdata_accessor_index
-			};
+				const char* target_path = nullptr;
+				int type = TINYGLTF_TYPE_VEC3;
+				switch (channel.path)
+				{
+				case Path::TRANSLATION:
+					target_path = "translation";
+					break;
+				case Path::ROTATION:
+					target_path = "rotation";
+					type = TINYGLTF_TYPE_VEC4;
+					break;
+				case Path::SCALE:
+					target_path = "scale";
+					break;
+				case Path::WEIGHTS:
+				{
+					// Only a mesh with morph targets has weights:
+					const ObjectComponent* object = wiscene.objects.GetComponent(channel.target);
+					const MeshComponent* mesh = object == nullptr ? nullptr : wiscene.meshes.GetComponent(object->meshID);
+					if (mesh == nullptr || mesh->morph_targets.empty())
+						continue;
+					target_path = "weights";
+					type = TINYGLTF_TYPE_SCALAR;
+				}
+				break;
+				default:
+					continue; // light, material, camera, sound, script and other channels have nothing to animate in glTF
+				}
+
+				if (channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
+					continue;
+				const AnimationComponent::AnimationSampler& sampler = animation.samplers[channel.samplerIndex];
+				const Scene& data_scene = sampler.scene == nullptr ? wiscene : *(const Scene*)sampler.scene;
+				const AnimationDataComponent* data = data_scene.animation_datas.GetComponent(sampler.data);
+				const size_t components = type == TINYGLTF_TYPE_VEC4 ? 4 : (type == TINYGLTF_TYPE_VEC3 ? 3 : 1);
+				if (data == nullptr || data->keyframe_times.empty() || data->keyframe_data.size() < components)
+					continue; // nothing to export (glTF accessors can't be empty)
+
+				const bool retargeted = channel.path != Path::WEIGHTS && channel.retargetIndex >= 0 && channel.retargetIndex < (int)animation.retargets.size();
+				if (!retargeted && &data_scene != &wiscene)
+					continue; // the keys of an other scene are not in the glTF space
+
+				int sampler_index = -1;
+				if (retargeted)
+				{
+					// Each retargeted channel has its own baked keys:
+					const AnimationComponent::RetargetSourceData& retarget = animation.retargets[channel.retargetIndex];
+					wi::vector<float> values = data->keyframe_data;
+					bake_retarget(retarget, data_scene.transforms.GetComponent(retarget.source), channel.path, values);
+
+					tinygltf::AnimationSampler sampler_builder;
+					sampler_builder.input = get_input_accessor(sampler.data, *data);
+					sampler_builder.output = write_accessor(values, type);
+					sampler_builder.interpolation = interpolation(sampler.mode);
+					sampler_index = (int)animation_builder.samplers.size();
+					animation_builder.samplers.push_back(sampler_builder);
+				}
+				else
+				{
+					const int sampler_key = channel.samplerIndex * 256 + type;
+					auto remapped = sampler_remap.find(sampler_key);
+					if (remapped != sampler_remap.end())
+					{
+						sampler_index = remapped->second;
+					}
+					else
+					{
+						tinygltf::AnimationSampler sampler_builder;
+						sampler_builder.input = get_input_accessor(sampler.data, *data);
+						sampler_builder.output = get_output_accessor(sampler.data, *data, type);
+						sampler_builder.interpolation = interpolation(sampler.mode);
+						sampler_index = (int)animation_builder.samplers.size();
+						animation_builder.samplers.push_back(sampler_builder);
+						sampler_remap[sampler_key] = sampler_index;
+					}
+				}
+
+				tinygltf::AnimationChannel channel_builder;
+				channel_builder.target_node = node->second;
+				channel_builder.sampler = sampler_index;
+				channel_builder.target_path = target_path;
+				animation_builder.channels.push_back(channel_builder);
+			}
+
+			if (animation_builder.channels.empty())
+				continue; // a glTF animation must have channels
+			state.gltfModel.animations.push_back(animation_builder);
 		}
-		state.gltfModel.buffers.push_back(buffer_builder);
-	}
-	for(size_t anim_id = 0; anim_id < wiscene.animations.GetCount(); ++anim_id)
-	{
-		auto& animation = wiscene.animations[anim_id];
-		
-		tinygltf::Animation animation_builder;
 
-		Entity entity = wiscene.animations.GetEntity(anim_id);
-		const NameComponent* name = wiscene.names.GetComponent(entity);
-		if (name != nullptr)
+		if (!buffer_builder.data.empty())
 		{
-			animation_builder.name = name->name;
+			state.gltfModel.buffers.push_back(buffer_builder);
 		}
-
-		// Samplers whose data is not in this scene (like an animation retargeted without baking) are left out,
-		//	so the samplers are renumbered for the channels:
-		wi::vector<int> sampler_remap(animation.samplers.size(), -1);
-		for(size_t sampler_index = 0; sampler_index < animation.samplers.size(); ++sampler_index)
-		{
-			auto& sampler = animation.samplers[sampler_index];
-			auto dataset = animation_datasets.find(sampler.data);
-			if(dataset == animation_datasets.end())
-				continue;
-
-			tinygltf::AnimationSampler sampler_builder;
-			sampler_builder.input = (int)dataset->second[1];
-			sampler_builder.output = (int)dataset->second[3];
-			sampler_builder.interpolation = 
-				(sampler.mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE) ? "CUBICSPLINE" :
-				(sampler.mode == AnimationComponent::AnimationSampler::Mode::STEP) ? "STEP" : "LINEAR";
-
-			sampler_remap[sampler_index] = (int)animation_builder.samplers.size();
-			animation_builder.samplers.push_back(sampler_builder);
-		}
-		for(auto& channel : animation.channels)
-		{
-			if(channel.samplerIndex < 0 || channel.samplerIndex >= (int)sampler_remap.size() || sampler_remap[channel.samplerIndex] < 0)
-				continue;
-
-			tinygltf::AnimationChannel channel_builder;
-			channel_builder.target_node = state.nodeMap[channel.target];
-			channel_builder.sampler = sampler_remap[channel.samplerIndex];
-			channel_builder.target_path = 
-				(channel.path == AnimationComponent::AnimationChannel::Path::SCALE) ? "scale" :
-				(channel.path == AnimationComponent::AnimationChannel::Path::ROTATION) ? "rotation" :
-				(channel.path == AnimationComponent::AnimationChannel::Path::TRANSLATION) ? "translation" : "weights";
-			
-			animation_builder.channels.push_back(channel_builder);
-		}
-		if(animation_builder.channels.empty())
-			continue; // a glTF animation must have channels
-		state.gltfModel.animations.push_back(animation_builder);
 	}
 
 	// Compose hierarchy
