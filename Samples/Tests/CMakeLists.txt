@@ -48,6 +48,13 @@ target_link_libraries(CustomShaderLifecycleTest PRIVATE WickedEngine)
 add_test(NAME CustomShaderLifecycleTest COMMAND CustomShaderLifecycleTest)
 set_target_properties(CustomShaderLifecycleTest PROPERTIES FOLDER "Tests")
 
+add_executable(TransformDecomposeTest
+	TransformDecomposeTest.cpp
+)
+target_link_libraries(TransformDecomposeTest PRIVATE WickedEngine)
+add_test(NAME TransformDecomposeTest COMMAND TransformDecomposeTest)
+set_target_properties(TransformDecomposeTest PROPERTIES FOLDER "Tests")
+
 
 if (MSVC)
 	set_property(TARGET Tests PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")

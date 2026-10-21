@@ -2692,7 +2692,7 @@ namespace wi::scene
 									TransformComponent transform = *source_transform;
 									XMStoreFloat4(&transform.rotation_local, bR);
 									XMMATRIX localMatrix = dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix;
-									XMMatrixDecompose(&S, &bR, &T, localMatrix);
+									wi::math::DecomposeTransform(&S, &bR, &T, localMatrix);
 								}
 							}
 							const XMVECTOR R = XMQuaternionSlerp(aR, bR, t);
@@ -5100,7 +5100,7 @@ namespace wi::scene
 
 			XMMATRIX W = XMLoadFloat4x4(&transform.world);
 			XMVECTOR S, R, T;
-			XMMatrixDecompose(&S, &R, &T, W);
+			wi::math::DecomposeTransform(&S, &R, &T, W);
 
 			XMStoreFloat3(&light.position, T);
 			XMStoreFloat4(&light.rotation, R);
@@ -9391,7 +9391,7 @@ namespace wi::scene
 										TransformComponent transform = *transform_source;
 										transform.rotation_local = *data;
 										XMMATRIX localMatrix = dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix;
-										XMMatrixDecompose(&S, &R, &T, localMatrix);
+										wi::math::DecomposeTransform(&S, &R, &T, localMatrix);
 										XMStoreFloat4(data, R);
 									}
 									break;
@@ -9809,7 +9809,7 @@ namespace wi::scene
 		// Modify world matrix:
 		XMMATRIX M = XMLoadFloat4x4(&transform.world);
 		XMVECTOR S, R, T;
-		XMMatrixDecompose(&S, &R, &T, M);
+		wi::math::DecomposeTransform(&S, &R, &T, M);
 
 		T = position_root;
 		R = XMQuaternionMultiply(R, Q);

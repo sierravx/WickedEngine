@@ -433,6 +433,15 @@ namespace wi::math
 	void ConstructTriangleEquilateral(float radius, XMFLOAT4& A, XMFLOAT4& B, XMFLOAT4& C);
 	void GetBarycentric(const XMVECTOR& p, const XMVECTOR& a, const XMVECTOR& b, const XMVECTOR& c, float &u, float &v, float &w, bool clamp = false);
 
+	// Decomposes a matrix into scale, rotation quaternion and translation, use this instead of XMMatrixDecompose()
+	//	When XMMatrixDecompose() succeeds, its result is returned unchanged.
+	//	XMMatrixDecompose() fails without writing the rotation for a matrix with shear, which is for example the world matrix
+	//	of a rotated child under a non-uniformly scaled parent. In that case the shear is dropped and the closest scale * rotation
+	//	is made by orthonormalizing the axes: the longest axis keeps its direction (and carries the mirroring), the middle one
+	//	is made perpendicular to it and the shortest one is their cross product.
+	//	All outputs are always written, and for a finite matrix the rotation is always a unit quaternion.
+	void DecomposeTransform(XMVECTOR* outScale, XMVECTOR* outRotQuat, XMVECTOR* outTrans, const XMMATRIX& M);
+
 	inline XMFLOAT3 GetPosition(const XMFLOAT4X4& _m)
 	{
 		return *((XMFLOAT3*)&_m._41);

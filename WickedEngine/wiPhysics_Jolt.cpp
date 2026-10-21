@@ -1618,7 +1618,7 @@ namespace wi::physics
 					XMVECTOR SCA = {};
 					XMVECTOR ROT = {};
 					XMVECTOR TRA = {};
-					XMMatrixDecompose(&SCA, &ROT, &TRA, restA);
+					wi::math::DecomposeTransform(&SCA, &ROT, &TRA, restA);
 					XMFLOAT4 rot = {};
 					XMFLOAT3 tra = {};
 					XMStoreFloat4(&rot, ROT);

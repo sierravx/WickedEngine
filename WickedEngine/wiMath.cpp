@@ -166,6 +166,81 @@ namespace wi::math
 		}
 	}
 
+	void DecomposeTransform(XMVECTOR* outScale, XMVECTOR* outRotQuat, XMVECTOR* outTrans, const XMMATRIX& M)
+	{
+		if (XMMatrixDecompose(outScale, outRotQuat, outTrans, M))
+			return;
+
+		// The matrix has shear, XMMatrixDecompose() refused it and didn't write the rotation.
+		//	The axes are orthonormalized here with the same conventions that XMMatrixDecompose() uses:
+		constexpr float epsilon = 0.0001f; // XM3_DECOMP_EPSILON
+		const XMVECTOR canonical[3] = { g_XMIdentityR0, g_XMIdentityR1, g_XMIdentityR2 };
+
+		XMVECTOR axis[3] = { M.r[0], M.r[1], M.r[2] };
+		float scale[3] = {
+			XMVectorGetX(XMVector3Length(axis[0])),
+			XMVectorGetX(XMVector3Length(axis[1])),
+			XMVectorGetX(XMVector3Length(axis[2])),
+		};
+
+		// a: longest axis, b: middle axis, c: shortest axis
+		int a = 0, b = 1, c = 2;
+		if (scale[a] < scale[b])
+			std::swap(a, b);
+		if (scale[b] < scale[c])
+			std::swap(b, c);
+		if (scale[a] < scale[b])
+			std::swap(a, b);
+
+		// The longest axis keeps its direction:
+		if (scale[a] < epsilon)
+		{
+			axis[a] = canonical[a];
+		}
+		axis[a] = XMVector3Normalize(axis[a]);
+
+		// The middle axis is made perpendicular to it:
+		if (scale[b] >= epsilon)
+		{
+			axis[b] = XMVector3Normalize(axis[b]);
+			axis[b] = axis[b] - XMVector3Dot(axis[b], axis[a]) * axis[a];
+		}
+		if (scale[b] < epsilon || XMVectorGetX(XMVector3Length(axis[b])) < epsilon)
+		{
+			// Zero length, or parallel to the longest axis: take a perpendicular direction like XMMatrixDecompose() does
+			const float absX = std::abs(XMVectorGetX(axis[a]));
+			const float absY = std::abs(XMVectorGetY(axis[a]));
+			const float absZ = std::abs(XMVectorGetZ(axis[a]));
+			const int smallest = absX <= absY && absX <= absZ ? 0 : (absY <= absZ ? 1 : 2);
+			axis[b] = XMVector3Cross(axis[a], canonical[smallest]);
+		}
+		axis[b] = XMVector3Normalize(axis[b]);
+
+		// The shortest axis is their cross product, pointing to the same side as the original axis:
+		axis[c] = XMVector3Normalize(XMVector3Cross(axis[a], axis[b]));
+		if (scale[c] >= epsilon && XMVectorGetX(XMVector3Dot(axis[c], M.r[c])) < 0)
+		{
+			axis[c] = XMVectorNegate(axis[c]);
+		}
+
+		XMMATRIX basis;
+		basis.r[0] = XMVectorSetW(axis[0], 0);
+		basis.r[1] = XMVectorSetW(axis[1], 0);
+		basis.r[2] = XMVectorSetW(axis[2], 0);
+		basis.r[3] = g_XMIdentityR3;
+
+		// Mirroring is carried by the longest axis:
+		if (XMVectorGetX(XMMatrixDeterminant(basis)) < 0)
+		{
+			scale[a] = -scale[a];
+			basis.r[a] = XMVectorNegate(basis.r[a]);
+		}
+
+		*outScale = XMVectorSet(scale[0], scale[1], scale[2], 0);
+		*outRotQuat = XMQuaternionRotationMatrix(basis);
+		*outTrans = M.r[3];
+	}
+
 	const XMFLOAT4& GetHaltonSequence(int idx)
 	{
 		static const XMFLOAT4 HALTON[] = {

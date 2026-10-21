@@ -487,24 +487,11 @@ void TransformWindow::Create(EditorComponent* _editor)
 								// Apply scale to inverse bind matrices
 								for (XMFLOAT4X4& bind : armature->inverseBindMatrices)
 								{
-									XMVECTOR V_S, V_R, V_T;
-									XMMatrixDecompose(&V_S, &V_R, &V_T, XMLoadFloat4x4(&bind));
-									XMFLOAT3 pos, bindScale;
-									XMFLOAT4 rot;
-									XMStoreFloat3(&bindScale, V_S);
-									XMStoreFloat3(&pos, V_T);
-									XMStoreFloat4(&rot, V_R);
-
 									// Scale the translation component
-									pos.x *= scale.x;
-									pos.y *= scale.y;
-									pos.z *= scale.z;
-
-									XMMATRIX newBind =
-										XMMatrixScalingFromVector(XMLoadFloat3(&bindScale)) *
-										XMMatrixRotationQuaternion(XMLoadFloat4(&rot)) *
-										XMMatrixTranslationFromVector(XMLoadFloat3(&pos));
-									XMStoreFloat4x4(&bind, newBind);
+									//	(directly, a decompose and rebuild would lose the matrix if it has shear)
+									bind._41 *= scale.x;
+									bind._42 *= scale.y;
+									bind._43 *= scale.z;
 								}
 
 								// Apply scale to bone transforms

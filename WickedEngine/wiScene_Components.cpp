@@ -56,13 +56,13 @@ namespace wi::scene
 	XMVECTOR TransformComponent::GetRotationV() const
 	{
 		XMVECTOR S, R, T;
-		XMMatrixDecompose(&S, &R, &T, XMLoadFloat4x4(&world));
+		wi::math::DecomposeTransform(&S, &R, &T, XMLoadFloat4x4(&world));
 		return R;
 	}
 	XMVECTOR TransformComponent::GetScaleV() const
 	{
 		XMVECTOR S, R, T;
-		XMMatrixDecompose(&S, &R, &T, XMLoadFloat4x4(&world));
+		wi::math::DecomposeTransform(&S, &R, &T, XMLoadFloat4x4(&world));
 		return S;
 	}
 	XMMATRIX TransformComponent::GetLocalMatrix() const
@@ -105,7 +105,7 @@ namespace wi::scene
 	void TransformComponent::GetPositionRotationScale(XMFLOAT3& position, XMFLOAT4& rotation, XMFLOAT3& scale) const
 	{
 		XMVECTOR S, R, T;
-		XMMatrixDecompose(&S, &R, &T, XMLoadFloat4x4(&world));
+		wi::math::DecomposeTransform(&S, &R, &T, XMLoadFloat4x4(&world));
 		XMStoreFloat3(&position, T);
 		XMStoreFloat4(&rotation, R);
 		XMStoreFloat3(&scale, S);
@@ -132,7 +132,7 @@ namespace wi::scene
 		SetDirty();
 
 		XMVECTOR S, R, T;
-		XMMatrixDecompose(&S, &R, &T, XMLoadFloat4x4(&world));
+		wi::math::DecomposeTransform(&S, &R, &T, XMLoadFloat4x4(&world));
 		XMStoreFloat3(&scale_local, S);
 		XMStoreFloat4(&rotation_local, R);
 		XMStoreFloat3(&translation_local, T);
@@ -218,7 +218,7 @@ namespace wi::scene
 		XMVECTOR S;
 		XMVECTOR R;
 		XMVECTOR T;
-		XMMatrixDecompose(&S, &R, &T, GetLocalMatrix() * matrix);
+		wi::math::DecomposeTransform(&S, &R, &T, GetLocalMatrix() * matrix);
 
 		XMStoreFloat3(&scale_local, S);
 		XMStoreFloat4(&rotation_local, R);
@@ -229,10 +229,10 @@ namespace wi::scene
 		SetDirty();
 
 		XMVECTOR aS, aR, aT;
-		XMMatrixDecompose(&aS, &aR, &aT, XMLoadFloat4x4(&a.world));
+		wi::math::DecomposeTransform(&aS, &aR, &aT, XMLoadFloat4x4(&a.world));
 
 		XMVECTOR bS, bR, bT;
-		XMMatrixDecompose(&bS, &bR, &bT, XMLoadFloat4x4(&b.world));
+		wi::math::DecomposeTransform(&bS, &bR, &bT, XMLoadFloat4x4(&b.world));
 
 		XMVECTOR S = XMVectorLerp(aS, bS, t);
 		XMVECTOR R = XMQuaternionSlerp(aR, bR, t);
@@ -247,16 +247,16 @@ namespace wi::scene
 		SetDirty();
 
 		XMVECTOR aS, aR, aT;
-		XMMatrixDecompose(&aS, &aR, &aT, XMLoadFloat4x4(&a.world));
+		wi::math::DecomposeTransform(&aS, &aR, &aT, XMLoadFloat4x4(&a.world));
 
 		XMVECTOR bS, bR, bT;
-		XMMatrixDecompose(&bS, &bR, &bT, XMLoadFloat4x4(&b.world));
+		wi::math::DecomposeTransform(&bS, &bR, &bT, XMLoadFloat4x4(&b.world));
 
 		XMVECTOR cS, cR, cT;
-		XMMatrixDecompose(&cS, &cR, &cT, XMLoadFloat4x4(&c.world));
+		wi::math::DecomposeTransform(&cS, &cR, &cT, XMLoadFloat4x4(&c.world));
 
 		XMVECTOR dS, dR, dT;
-		XMMatrixDecompose(&dS, &dR, &dT, XMLoadFloat4x4(&d.world));
+		wi::math::DecomposeTransform(&dS, &dR, &dT, XMLoadFloat4x4(&d.world));
 
 		XMVECTOR T = XMVectorCatmullRom(aT, bT, cT, dT, t);
 
