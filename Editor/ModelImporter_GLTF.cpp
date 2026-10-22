@@ -4962,16 +4962,24 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 	tinygltf::Scene scene_builder;
 
+	// glTF lights point forward, engine lights point down (the import rotates them by the inverse of this): light nodes are
+	//	written with this rotation applied before their own, and their rotation keys get it too (see the animations below).
+	//	Only the written values are rotated, the lights of the scene are left as they are.
+	const XMVECTOR light_forward_flip = XMQuaternionRotationRollPitchYaw(-XM_PIDIV2, 0, 0);
+
 	// Compose Node
 	for(size_t t_id = 0; t_id < wiscene.transforms.GetCount(); ++t_id)
 	{
-		auto& transformComponent = wiscene.transforms[t_id];
+		const TransformComponent& transformComponent = wiscene.transforms[t_id];
 		auto transformEntity = wiscene.transforms.GetEntity(t_id);
 		auto nameComponent = wiscene.names.GetComponent(transformEntity);
 
-		auto light_forward_flip = wiscene.lights.Contains(transformEntity);
-		if(light_forward_flip)
-			transformComponent.RotateRollPitchYaw(XMFLOAT3(-XM_PIDIV2,0,0));
+		XMFLOAT4 rotation = transformComponent.rotation_local;
+		if(wiscene.lights.Contains(transformEntity))
+		{
+			// (normalized, as TransformComponent::RotateRollPitchYaw() would give it)
+			XMStoreFloat4(&rotation, XMQuaternionNormalize(XMQuaternionMultiply(light_forward_flip, XMLoadFloat4(&rotation))));
+		}
 
 		auto objectComponent = wiscene.objects.GetComponent(transformEntity);
 
@@ -4985,18 +4993,15 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		node_builder.scale.push_back(transformComponent.scale_local.y);
 		node_builder.scale.push_back(transformComponent.scale_local.z);
 
-		node_builder.rotation.push_back(transformComponent.rotation_local.x);
-		node_builder.rotation.push_back(transformComponent.rotation_local.y);
-		node_builder.rotation.push_back(transformComponent.rotation_local.z);
-		node_builder.rotation.push_back(transformComponent.rotation_local.w);
+		node_builder.rotation.push_back(rotation.x);
+		node_builder.rotation.push_back(rotation.y);
+		node_builder.rotation.push_back(rotation.z);
+		node_builder.rotation.push_back(rotation.w);
 
 		node_builder.translation.push_back(transformComponent.translation_local.x);
 		node_builder.translation.push_back(transformComponent.translation_local.y);
 		node_builder.translation.push_back(transformComponent.translation_local.z);
 
-		if(light_forward_flip)
-			transformComponent.RotateRollPitchYaw(XMFLOAT3(XM_PIDIV2,0,0));
-		
 		if(objectComponent != nullptr)
 		{
 			if(objectComponent->meshID != wi::ecs::INVALID_ENTITY && wiscene.meshes.Contains(objectComponent->meshID))
@@ -5224,9 +5229,6 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				previous_result = sign * result;
 			}
 		};
-
-		// Light nodes are written with a forward flip in their rotation (see the nodes above), their rotation keys get it too:
-		const XMVECTOR light_forward_flip = XMQuaternionRotationRollPitchYaw(-XM_PIDIV2, 0, 0);
 
 		// The keys of a channel are written as they are, or with these changes. The same data with the same changes shares accessors:
 		enum KeyChanges : uint32_t
