@@ -169,10 +169,14 @@ static void ImportMetadata(LoaderState& state, Entity entity, const tinygltf::Va
 {
 	if (extras.IsObject())
 	{
-		MetadataComponent& metadata = state.scene->metadatas.Create(entity);
+		// An entity can get the extras of several glTF objects (a node and its camera, a skin and its node), they are merged:
+		MetadataComponent* existing = state.scene->metadatas.GetComponent(entity);
+		MetadataComponent& metadata = existing != nullptr ? *existing : state.scene->metadatas.Create(entity);
 
 		for (auto& key : extras.Keys())
 		{
+			if (metadata.bool_values.has(key) || metadata.int_values.has(key) || metadata.float_values.has(key) || metadata.string_values.has(key))
+				continue; // the value imported first stays (a node's own value over its camera's)
 			auto& value = extras.Get(key);
 			switch (value.Type())
 			{
@@ -212,6 +216,7 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 	auto& node = state.gltfModel.nodes[nodeIndex];
 	Scene& scene = *state.scene;
 	Entity entity = INVALID_ENTITY;
+	Entity objectEntity = INVALID_ENTITY;
 
 	if(node.mesh >= 0)
 	{
@@ -236,7 +241,7 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 			mesh->armatureID = entity;
 
 			// The object component will use an identity transform but will be parented to the armature:
-			Entity objectEntity = scene.Entity_CreateObject(node.name);
+			objectEntity = scene.Entity_CreateObject(node.name);
 			ObjectComponent& object = *scene.objects.GetComponent(objectEntity);
 			object.meshID = meshEntity;
 			scene.Component_Attach(objectEntity, entity, true);
@@ -245,20 +250,33 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 		{
 			// This node is a mesh instance:
 			entity = scene.Entity_CreateObject(node.name);
+			objectEntity = entity;
 			ObjectComponent& object = *scene.objects.GetComponent(entity);
 			object.meshID = scene.meshes.GetEntity(node.mesh);
 		}
 	}
-	else if (node.camera >= 0)
-	{
-		if (node.name.empty())
-		{
-			static int camID = 0;
-			node.name = "cam" + std::to_string(camID++);
-		}
 
-		entity = scene.Entity_CreateCamera(node.name, 16, 9); // camera component will be filled later
-		state.cameraMap.insert({ node.camera, entity });
+	if (node.camera >= 0)
+	{
+		Entity cameraEntity = objectEntity;
+		if (cameraEntity == INVALID_ENTITY)
+		{
+			if (node.name.empty())
+			{
+				static int camID = 0;
+				node.name = "cam" + std::to_string(camID++);
+			}
+
+			entity = scene.Entity_CreateCamera(node.name, 16, 9);
+			cameraEntity = entity;
+		}
+		else
+		{
+			// The camera of a node with a mesh is put on the object, like Entity_CreateCamera() would create it (the object of
+			//	a skinned mesh is under the armature, without the node's transform, like the mesh):
+			scene.cameras.Create(cameraEntity).CreatePerspective(16, 9, 0.01f, 1000.0f, XM_PIDIV4);
+		}
+		state.cameraMap.insert({ node.camera, cameraEntity }); // camera component will be filled later
 	}
 
 	if (entity == INVALID_ENTITY)
