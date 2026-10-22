@@ -463,6 +463,183 @@ namespace
 		check_animation(reimported, "light export and import");
 	}
 
+	// The entity with the light of a node: the node, or a descendant of it
+	Entity LightUnder(const Scene& scene, Entity node)
+	{
+		for (size_t i = 0; node != INVALID_ENTITY && i < scene.lights.GetCount(); ++i)
+		{
+			const Entity entity = scene.lights.GetEntity(i);
+			if (entity == node || scene.Entity_IsDescendant(entity, node))
+				return entity;
+		}
+		return INVALID_ENTITY;
+	}
+
+	// Export of engine lights that have more on their node: a child, a mesh, a camera. The rotation between the engine's
+	//	light direction (down) and glTF's (forward) must not turn those, and the import of the export must give the world
+	//	matrices and light directions of the scene, also when the rotation animation of a light plays.
+	void CheckLightsWithNodes()
+	{
+		const std::string export_name = "GLTFExportTest_lights_with_nodes";
+		Scene scene;
+		const Entity material = CreateEntity();
+		scene.materials.Create(material);
+		const Entity mesh = CreateMorphedMesh(scene, material);
+
+		// A spot light with a non-uniform scale, a child, a mesh and a rotation animation:
+		const Entity lantern = CreateNode(scene, "Lantern", XMFLOAT3(1, 2, 3), XMFLOAT3(0.3f, -0.2f, 0.5f));
+		scene.transforms.GetComponent(lantern)->scale_local = XMFLOAT3(1, 2, 0.5f);
+		scene.transforms.GetComponent(lantern)->SetDirty();
+		scene.lights.Create(lantern).SetType(LightComponent::SPOT);
+		scene.objects.Create(lantern).meshID = mesh;
+		const Entity handle = CreateNode(scene, "Handle", XMFLOAT3(0.5f, -0.25f, -1), XMFLOAT3(0.1f, 0.4f, -0.3f));
+		scene.Component_Attach(handle, lantern, true);
+		// A directional light with a camera:
+		const Entity torch = CreateNode(scene, "Torch", XMFLOAT3(-2, 0.5f, 1), XMFLOAT3(-0.6f, 0.2f, 0.4f));
+		scene.lights.Create(torch).SetType(LightComponent::DIRECTIONAL);
+		scene.cameras.Create(torch);
+
+		const XMVECTOR keys[2] = { XMQuaternionRotationRollPitchYaw(0.2f, 0.4f, 0.1f), XMQuaternionRotationRollPitchYaw(-0.3f, 0.1f, 0.5f) };
+		wi::vector<float> key_data(8);
+		XMStoreFloat4((XMFLOAT4*)&key_data[0], keys[0]);
+		XMStoreFloat4((XMFLOAT4*)&key_data[4], keys[1]);
+		const Entity animationEntity = CreateEntity();
+		scene.names.Create(animationEntity) = "LanternSwing";
+		{
+			AnimationComponent& animation = scene.animations.Create(animationEntity);
+			animation.samplers.emplace_back().data = CreateData(scene, { 0, 1 }, key_data);
+			AnimationComponent::AnimationChannel& channel = animation.channels.emplace_back();
+			channel.target = lantern;
+			channel.samplerIndex = 0;
+			channel.path = Path::ROTATION;
+			animation.end = 1;
+		}
+
+		const char* nodes[] = { "Lantern", "Handle", "Torch" };
+		const char* lights[] = { "Lantern", "Torch" };
+		struct State
+		{
+			wi::vector<XMFLOAT4X4> worlds;
+			wi::vector<XMFLOAT3> directions;
+			wi::vector<XMFLOAT3> positions;
+		};
+		auto state_of = [&](Scene& of) {
+			State state;
+			for (const char* name : nodes)
+			{
+				const TransformComponent* transform = of.transforms.GetComponent(of.Entity_FindByName(name));
+				state.worlds.push_back(transform == nullptr ? XMFLOAT4X4() : transform->world);
+			}
+			for (const char* name : lights)
+			{
+				const LightComponent* light = of.lights.GetComponent(LightUnder(of, of.Entity_FindByName(name)));
+				state.directions.push_back(light == nullptr ? XMFLOAT3() : light->direction);
+				state.positions.push_back(light == nullptr ? XMFLOAT3() : light->position);
+			}
+			return state;
+		};
+		auto check_state = [&](const State& state, const State& expected, const std::string& what) {
+			for (size_t i = 0; i < std::size(nodes); ++i)
+			{
+				Check(NearMatrix(state.worlds[i], XMLoadFloat4x4(&expected.worlds[i])), what + ": the node " + nodes[i] + " does not have the world matrix of the scene");
+			}
+			for (size_t i = 0; i < std::size(lights); ++i)
+			{
+				Check(XMVectorGetX(XMVector3Length(XMLoadFloat3(&state.directions[i]) - XMLoadFloat3(&expected.directions[i]))) < 1e-4f, what + ": the light of " + lights[i] + " does not point where the light of the scene points");
+				Check(XMVectorGetX(XMVector3Length(XMLoadFloat3(&state.positions[i]) - XMLoadFloat3(&expected.positions[i]))) < 1e-4f, what + ": the light of " + lights[i] + " is not where the light of the scene is");
+			}
+		};
+		// Evaluates the animation at its last key (the timer is evaluated when it changes, also if the animation doesn't play):
+		auto state_at_last_key = [&](Scene& of) {
+			for (size_t i = 0; i < of.animations.GetCount(); ++i)
+			{
+				const NameComponent* name = of.names.GetComponent(of.animations.GetEntity(i));
+				if (name != nullptr && name->name == "LanternSwing")
+				{
+					of.animations[i].timer = 1;
+				}
+			}
+			of.Update(0);
+			return state_of(of);
+		};
+
+		scene.Update(0);
+		const State expected = state_of(scene);
+		Check(LightUnder(scene, lantern) == lantern && LightUnder(scene, torch) == torch && std::abs(XMVectorGetX(XMVector3Length(XMLoadFloat3(&expected.directions[0]))) - 1) < 1e-4f, "the lights of the scene with nodes were not made");
+
+		RemoveOutputFiles(export_name);
+		ExportModel_GLTF(export_name + ".gltf", scene);
+		tinygltf::TinyGLTF loader;
+		tinygltf::Model model;
+		std::string err, warn;
+		if (!loader.LoadASCIIFromFile(&model, &err, &warn, export_name + ".gltf"))
+		{
+			Check(false, "the exported file of the lights with nodes could not be loaded: " + err);
+			RemoveOutputFiles(export_name);
+			return;
+		}
+		Scene imported;
+		ImportModel_GLTF(export_name + ".gltf", imported);
+		RemoveOutputFiles(export_name);
+
+		// In the file, the light nodes keep their rotation (in the glTF space), mesh and camera, the lights are on child nodes:
+		auto find_node = [&](const std::string& name) -> const tinygltf::Node* {
+			for (const tinygltf::Node& node : model.nodes)
+			{
+				if (node.name == name && (node.mesh >= 0 || node.camera >= 0))
+					return &node;
+			}
+			return nullptr;
+		};
+		auto rotation_of = [](const tinygltf::Node& node) {
+			return node.rotation.size() == 4 ? XMVectorSet(float(node.rotation[0]), float(node.rotation[1]), float(node.rotation[2]), float(node.rotation[3])) : XMQuaternionIdentity();
+		};
+		auto light_children = [&](const tinygltf::Node& node) {
+			size_t count = 0;
+			for (int child : node.children)
+			{
+				count += child >= 0 && child < (int)model.nodes.size() && model.nodes[child].light >= 0 ? 1 : 0;
+			}
+			return count;
+		};
+		const tinygltf::Node* lantern_node = find_node("Lantern");
+		const tinygltf::Node* torch_node = find_node("Torch");
+		Check(lantern_node != nullptr && torch_node != nullptr && lantern_node->mesh >= 0 && torch_node->camera >= 0, "the nodes of lights with a mesh or a camera were not written with them");
+		if (lantern_node != nullptr && torch_node != nullptr)
+		{
+			Check(lantern_node->light < 0 && light_children(*lantern_node) == 1 && torch_node->light < 0 && light_children(*torch_node) == 1, "the lights of nodes with more were not written on a child node");
+			Check(SameRotation(rotation_of(*lantern_node), MirrorRotation(XMLoadFloat4(&scene.transforms.GetComponent(lantern)->rotation_local))), "the node of a light with more was written with the light rotation");
+			for (const tinygltf::Animation& animation : model.animations)
+			{
+				for (const tinygltf::AnimationChannel& channel : animation.channels)
+				{
+					if (channel.target_node < 0 || &model.nodes[channel.target_node] != lantern_node || channel.sampler < 0 || channel.sampler >= (int)animation.samplers.size())
+						continue;
+					const wi::vector<float> values = ReadAccessor(model, animation.samplers[channel.sampler].output);
+					Check(values.size() == 8 && SameRotation(XMLoadFloat4((const XMFLOAT4*)&values[0]), MirrorRotation(keys[0])) && SameRotation(XMLoadFloat4((const XMFLOAT4*)&values[4]), MirrorRotation(keys[1])), "the rotation keys of a light with more were written with the light rotation");
+				}
+			}
+		}
+
+		const ObjectComponent* object = imported.objects.GetComponent(imported.Entity_FindByName("Lantern"));
+		Check(object != nullptr && imported.meshes.Contains(object->meshID), "the mesh of a light did not import back on its node");
+		Check(imported.cameras.Contains(imported.Entity_FindByName("Torch")), "the camera of a light did not import back on its node");
+		Check(imported.lights.GetCount() == std::size(lights), "expected the 2 lights with nodes to import back, got " + std::to_string(imported.lights.GetCount()));
+		check_state(state_of(imported), expected, "lights with nodes, export and import");
+
+		// An other export writes the same nodes (and the root of the import), it doesn't add nodes for the lights again:
+		ExportModel_GLTF(export_name + ".gltf", imported);
+		tinygltf::Model again;
+		const bool loaded = loader.LoadASCIIFromFile(&again, &err, &warn, export_name + ".gltf");
+		RemoveOutputFiles(export_name);
+		auto light_nodes = [](const tinygltf::Model& of) {
+			return std::count_if(of.nodes.begin(), of.nodes.end(), [](const tinygltf::Node& node) { return node.light >= 0; });
+		};
+		Check(loaded && again.nodes.size() == model.nodes.size() + 1 && light_nodes(again) == light_nodes(model), "the export of the import of lights with nodes did not write the same nodes");
+
+		check_state(state_at_last_key(imported), state_at_last_key(scene), "lights with nodes, export and import, at the last key of the animation");
+	}
+
 	int RunExport(int device_created_pipe)
 	{
 		wi::jobsystem::Initialize();
@@ -473,6 +650,7 @@ namespace
 		close(device_created_pipe);
 
 		CheckLightNodes();
+		CheckLightsWithNodes();
 
 		RemoveOutputFiles(output_name); // the files of an earlier run must not be checked
 
