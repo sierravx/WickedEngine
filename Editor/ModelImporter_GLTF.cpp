@@ -223,6 +223,7 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 	auto& node = state.gltfModel.nodes[nodeIndex];
 	Scene& scene = *state.scene;
 	Entity entity = INVALID_ENTITY;
+	Entity object_entity = INVALID_ENTITY; // the object of a node with a mesh
 
 	if(node.mesh >= 0)
 	{
@@ -251,6 +252,7 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 			ObjectComponent& object = *scene.objects.GetComponent(objectEntity);
 			object.meshID = meshEntity;
 			scene.Component_Attach(objectEntity, entity, true);
+			object_entity = objectEntity;
 		}
 		else
 		{
@@ -258,18 +260,31 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 			entity = scene.Entity_CreateObject(node.name);
 			ObjectComponent& object = *scene.objects.GetComponent(entity);
 			object.meshID = scene.meshes.GetEntity(node.mesh);
+			object_entity = entity;
 		}
 	}
-	else if (node.camera >= 0)
-	{
-		if (node.name.empty())
-		{
-			static int camID = 0;
-			node.name = "cam" + std::to_string(camID++);
-		}
 
-		entity = scene.Entity_CreateCamera(node.name, 16, 9); // camera component will be filled later
-		state.cameraMap.insert({ node.camera, entity });
+	if (node.camera >= 0)
+	{
+		Entity camera_entity = object_entity;
+		if (camera_entity == INVALID_ENTITY)
+		{
+			if (node.name.empty())
+			{
+				static int camID = 0;
+				node.name = "cam" + std::to_string(camID++);
+			}
+
+			entity = scene.Entity_CreateCamera(node.name, 16, 9); // camera component will be filled later
+			camera_entity = entity;
+		}
+		else
+		{
+			// The node is also a mesh: the object gets the camera (unlike lights, glTF cameras look the same way as engine cameras
+			//	after the flip of the Z axis), with the values of Scene::Entity_CreateCamera(), it will be filled later
+			scene.cameras.Create(camera_entity).CreatePerspective(16, 9, 0.01f, 1000.0f, XM_PIDIV4);
+		}
+		state.cameraMap.insert({ node.camera, camera_entity });
 	}
 
 	Entity light_child = INVALID_ENTITY; // the light of a node that is also a mesh or a camera
@@ -1876,7 +1891,22 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 			Entity entity = it->second;
 			CameraComponent& camera = *scene.cameras.GetComponent(entity);
 
-			if (x.type.compare("orthographic"))
+			if (!x.type.compare("orthographic"))
+			{
+				// glTF has half the width and height of the view, the engine the height and the aspect ratio:
+				const double xmag = std::abs(x.orthographic.xmag);
+				const double ymag = std::abs(x.orthographic.ymag);
+				if (xmag > 0 && ymag > 0)
+				{
+					camera.width = float(xmag / ymag);
+					camera.height = 1.f;
+					camera.ortho_vertical_size = float(2 * ymag);
+				}
+				camera.zFarP = (float)x.orthographic.zfar;
+				camera.zNearP = (float)x.orthographic.znear;
+				camera.SetOrtho(true);
+			}
+			else
 			{
 				if (x.perspective.aspectRatio > 0)
 				{
@@ -1884,7 +1914,11 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 					camera.height = 1.f;
 				}
 				camera.fov = (float)x.perspective.yfov;
-				camera.zFarP = (float)x.perspective.zfar;
+				if (x.perspective.zfar > 0)
+				{
+					// (without zfar, the projection is infinite in glTF, which the engine doesn't have: the camera keeps its far plane)
+					camera.zFarP = (float)x.perspective.zfar;
+				}
 				camera.zNearP = (float)x.perspective.znear;
 			}
 
@@ -5000,11 +5034,23 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		if(nameComponent != nullptr)
 			camera_builder.name = nameComponent->name;
 
-		camera_builder.type = "perspective";
-		camera_builder.perspective.aspectRatio = camera.width/camera.height;
-		camera_builder.perspective.yfov = camera.fov;
-		camera_builder.perspective.zfar = camera.zFarP;
-		camera_builder.perspective.znear = camera.zNearP;
+		if(camera.IsOrtho())
+		{
+			// glTF has half the width and height of the view:
+			camera_builder.type = "orthographic";
+			camera_builder.orthographic.ymag = camera.ortho_vertical_size * 0.5;
+			camera_builder.orthographic.xmag = camera_builder.orthographic.ymag * camera.width / camera.height;
+			camera_builder.orthographic.zfar = camera.zFarP;
+			camera_builder.orthographic.znear = camera.zNearP;
+		}
+		else
+		{
+			camera_builder.type = "perspective";
+			camera_builder.perspective.aspectRatio = camera.width/camera.height;
+			camera_builder.perspective.yfov = camera.fov;
+			camera_builder.perspective.zfar = camera.zFarP;
+			camera_builder.perspective.znear = camera.zNearP;
+		}
 
 		state.gltfModel.cameras.push_back(camera_builder);
 	}

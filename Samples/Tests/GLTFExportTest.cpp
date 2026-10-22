@@ -477,56 +477,83 @@ namespace
 		check_nodes(reimported, "after an export and an import");
 	}
 
-	// Import: each camera node gets the values of its own glTF camera, also when cameras are shared by nodes, are in an
-	//	other order than the nodes, or are orthographic (which the import does not support, the node gets the defaults)
+	// Import: each camera node gets the values of its own glTF camera, also when cameras are shared by nodes or are in an
+	//	other order than the nodes. Orthographic cameras, cameras without a far plane (an infinite projection, which keeps the
+	//	far plane of the engine camera) and a node with a mesh and a camera (the object gets the camera) are imported, also
+	//	after an export and an import.
 	void CheckCameraImport()
 	{
+		const float positions[9] = { 0, 0, 0, 1, 0, 0, 0, 1, 0 }; // a triangle
+		static_assert(sizeof(positions) == 36, "the byteLength and buffer view in the file below");
 		const char* cameras_file = "GLTFImportTest_cameras.gltf";
+		const char* cameras_bin = "GLTFImportTest_cameras.bin"; // the uri in the file below
 		bool written = false;
+		if (FILE* bin = fopen(cameras_bin, "wb"))
+		{
+			written = fwrite(positions, sizeof(positions), 1, bin) == 1;
+			written &= fclose(bin) == 0;
+		}
 		if (FILE* gltf = fopen(cameras_file, "w"))
 		{
-			written = fputs(R"({
+			written &= fputs(R"({
 	"asset": { "version": "2.0" },
 	"scene": 0,
-	"scenes": [ { "nodes": [ 0, 1, 2, 3, 4 ] } ],
+	"scenes": [ { "nodes": [ 0, 1, 2, 3, 4, 5, 6 ] } ],
 	"nodes": [
 		{ "name": "CameraA", "camera": 2 },
 		{ "name": "CameraB", "camera": 0 },
 		{ "name": "CameraC", "camera": 0 },
 		{ "name": "OrthographicCamera", "camera": 1 },
-		{ "name": "CameraD", "camera": 2 }
+		{ "name": "CameraD", "camera": 2 },
+		{ "name": "InfiniteCamera", "camera": 3 },
+		{ "name": "MeshCamera", "mesh": 0, "camera": 0, "translation": [ 1, 2, 3 ] }
 	],
 	"cameras": [
 		{ "type": "perspective", "perspective": { "yfov": 0.5, "znear": 0.1, "zfar": 100 }, "extras": { "camera": 0 } },
-		{ "type": "orthographic", "orthographic": { "xmag": 1, "ymag": 1, "znear": 0.5, "zfar": 10 }, "extras": { "camera": 1 } },
-		{ "type": "perspective", "perspective": { "yfov": 1.2, "aspectRatio": 2, "znear": 0.2, "zfar": 200 }, "extras": { "camera": 2 } }
-	]
+		{ "type": "orthographic", "orthographic": { "xmag": 3, "ymag": 1.5, "znear": 0.5, "zfar": 10 }, "extras": { "camera": 1 } },
+		{ "type": "perspective", "perspective": { "yfov": 1.2, "aspectRatio": 2, "znear": 0.2, "zfar": 200 }, "extras": { "camera": 2 } },
+		{ "type": "perspective", "perspective": { "yfov": 0.8, "znear": 0.3 }, "extras": { "camera": 3 } }
+	],
+	"meshes": [ { "primitives": [ { "attributes": { "POSITION": 0 } } ] } ],
+	"buffers": [ { "byteLength": 36, "uri": "GLTFImportTest_cameras.bin" } ],
+	"bufferViews": [ { "buffer": 0, "byteOffset": 0, "byteLength": 36 } ],
+	"accessors": [ { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [ 0, 0, 0 ], "max": [ 1, 1, 0 ] } ]
 })", gltf) >= 0;
 			written &= fclose(gltf) == 0;
+		}
+		else
+		{
+			written = false;
 		}
 		Check(written, "the glTF file of the camera test could not be written");
 		if (!written)
 		{
 			std::remove(cameras_file);
+			std::remove(cameras_bin);
 			return;
 		}
 
 		Scene scene;
 		ImportModel_GLTF(cameras_file, scene);
 		std::remove(cameras_file);
+		std::remove(cameras_bin);
 
 		struct ExpectedCamera
 		{
 			const char* name;
-			float fov, aspect, znear, zfar;
+			bool ortho;
+			float fov, aspect, znear, zfar, ortho_vertical_size;
 			int camera; // the glTF camera, in the extras
 		};
+		// (the values that the glTF cameras don't have are the defaults of Scene::Entity_CreateCamera() and of CameraComponent)
 		const ExpectedCamera expected[] = {
-			{ "CameraA", 1.2f, 2, 0.2f, 200, 2 },
-			{ "CameraB", 0.5f, 16.0f / 9.0f, 0.1f, 100, 0 },
-			{ "CameraC", 0.5f, 16.0f / 9.0f, 0.1f, 100, 0 },
-			{ "OrthographicCamera", XM_PIDIV4, 16.0f / 9.0f, 0.01f, 1000, 1 }, // (the defaults of Scene::Entity_CreateCamera())
-			{ "CameraD", 1.2f, 2, 0.2f, 200, 2 },
+			{ "CameraA", false, 1.2f, 2, 0.2f, 200, 1, 2 },
+			{ "CameraB", false, 0.5f, 16.0f / 9.0f, 0.1f, 100, 1, 0 },
+			{ "CameraC", false, 0.5f, 16.0f / 9.0f, 0.1f, 100, 1, 0 },
+			{ "OrthographicCamera", true, XM_PIDIV4, 2, 0.5f, 10, 3, 1 },
+			{ "CameraD", false, 1.2f, 2, 0.2f, 200, 1, 2 },
+			{ "InfiniteCamera", false, 0.8f, 16.0f / 9.0f, 0.3f, 1000, 1, 3 },
+			{ "MeshCamera", false, 0.5f, 16.0f / 9.0f, 0.1f, 100, 1, 0 },
 		};
 		auto check_cameras = [&](Scene& imported, bool extras, const std::string& when) {
 			Check(imported.cameras.GetCount() == std::size(expected), "the camera nodes did not import as " + std::to_string(std::size(expected)) + " cameras " + when);
@@ -534,7 +561,8 @@ namespace
 			{
 				const Entity entity = imported.Entity_FindByName(x.name);
 				const CameraComponent* camera = imported.cameras.GetComponent(entity);
-				Check(camera != nullptr && camera->height > 0 && Near({ camera->fov, camera->width / camera->height, camera->zNearP, camera->zFarP }, { x.fov, x.aspect, x.znear, x.zfar }),
+				Check(camera != nullptr && camera->height > 0 && camera->IsOrtho() == x.ortho &&
+					Near({ camera->fov, camera->width / camera->height, camera->zNearP, camera->zFarP, camera->ortho_vertical_size }, { x.fov, x.aspect, x.znear, x.zfar, x.ortho_vertical_size }),
 					std::string("the camera node ") + x.name + " did not get the values of its camera " + when);
 				if (extras)
 				{
@@ -543,6 +571,11 @@ namespace
 						std::string("the camera node ") + x.name + " did not get the extras of its camera " + when);
 				}
 			}
+			const Entity mesh_camera = imported.Entity_FindByName("MeshCamera");
+			const TransformComponent* transform = imported.transforms.GetComponent(mesh_camera);
+			Check(imported.objects.GetCount() == 1 && imported.objects.Contains(mesh_camera) && ParentOf(imported, mesh_camera) != INVALID_ENTITY && transform != nullptr &&
+				Near({ transform->translation_local.x, transform->translation_local.y, transform->translation_local.z }, { 1, 2, -3 }),
+				"the node with a mesh and a camera did not import as an object with the camera " + when);
 		};
 		check_cameras(scene, true, "after the import");
 
