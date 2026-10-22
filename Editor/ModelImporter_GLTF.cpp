@@ -149,6 +149,7 @@ struct LoaderState
 	Scene* scene;
 	wi::unordered_map<int, Entity> entityMap;  // node -> entity
 	std::unordered_multimap<int, Entity> punctualLightMap;  // KHR_lights_punctual -> light entities (children of the nodes)
+	std::unordered_multimap<int, Entity> cameraMap;  // camera -> entities
 	Entity rootEntity = INVALID_ENTITY;
 
 	//Export states
@@ -168,10 +169,14 @@ static void ImportMetadata(LoaderState& state, Entity entity, const tinygltf::Va
 {
 	if (extras.IsObject())
 	{
-		MetadataComponent& metadata = state.scene->metadatas.Create(entity);
+		// An entity can get the extras of several glTF objects (a node and its camera, a skin and its node), they are merged:
+		MetadataComponent* existing = state.scene->metadatas.GetComponent(entity);
+		MetadataComponent& metadata = existing != nullptr ? *existing : state.scene->metadatas.Create(entity);
 
 		for (auto& key : extras.Keys())
 		{
+			if (metadata.bool_values.has(key) || metadata.int_values.has(key) || metadata.float_values.has(key) || metadata.string_values.has(key))
+				continue; // the value imported first stays (a node's own value over its camera's)
 			auto& value = extras.Get(key);
 			switch (value.Type())
 			{
@@ -211,6 +216,7 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 	auto& node = state.gltfModel.nodes[nodeIndex];
 	Scene& scene = *state.scene;
 	Entity entity = INVALID_ENTITY;
+	Entity objectEntity = INVALID_ENTITY;
 
 	if(node.mesh >= 0)
 	{
@@ -235,7 +241,7 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 			mesh->armatureID = entity;
 
 			// The object component will use an identity transform but will be parented to the armature:
-			Entity objectEntity = scene.Entity_CreateObject(node.name);
+			objectEntity = scene.Entity_CreateObject(node.name);
 			ObjectComponent& object = *scene.objects.GetComponent(objectEntity);
 			object.meshID = meshEntity;
 			scene.Component_Attach(objectEntity, entity, true);
@@ -244,19 +250,33 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 		{
 			// This node is a mesh instance:
 			entity = scene.Entity_CreateObject(node.name);
+			objectEntity = entity;
 			ObjectComponent& object = *scene.objects.GetComponent(entity);
 			object.meshID = scene.meshes.GetEntity(node.mesh);
 		}
 	}
-	else if (node.camera >= 0)
-	{
-		if (node.name.empty())
-		{
-			static int camID = 0;
-			node.name = "cam" + std::to_string(camID++);
-		}
 
-		entity = scene.Entity_CreateCamera(node.name, 16, 9);
+	if (node.camera >= 0)
+	{
+		Entity cameraEntity = objectEntity;
+		if (cameraEntity == INVALID_ENTITY)
+		{
+			if (node.name.empty())
+			{
+				static int camID = 0;
+				node.name = "cam" + std::to_string(camID++);
+			}
+
+			entity = scene.Entity_CreateCamera(node.name, 16, 9);
+			cameraEntity = entity;
+		}
+		else
+		{
+			// The camera of a node with a mesh is put on the object, like Entity_CreateCamera() would create it (the object of
+			//	a skinned mesh is under the armature, without the node's transform, like the mesh):
+			scene.cameras.Create(cameraEntity).CreatePerspective(16, 9, 0.01f, 1000.0f, XM_PIDIV4);
+		}
+		state.cameraMap.insert({ node.camera, cameraEntity }); // camera component will be filled later
 	}
 
 	if (entity == INVALID_ENTITY)
@@ -1542,9 +1562,11 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 			armature.inverseBindMatrices.resize(accessor.count);
 			memcpy(armature.inverseBindMatrices.data(), &buffer.data[accessor.byteOffset + bufferView.byteOffset], accessor.count * sizeof(XMFLOAT4X4));
 		}
-		else
+		// glTF 2.0 specification, Skins: "When undefined, each matrix is a 4x4 identity matrix." The joints of a file with
+		//	fewer matrices than joints (an invalid file) get the identity too, every bone of the armature needs a matrix:
+		if (armature.inverseBindMatrices.size() < skin.joints.size())
 		{
-			assert(0);
+			armature.inverseBindMatrices.resize(skin.joints.size(), wi::math::IDENTITY_MATRIX);
 		}
 		ImportMetadata(state, armatureEntity, skin.extras);
 	}
@@ -1774,24 +1796,46 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 		lightIndex++;
 	}
 
+	// Fill cameras (a camera can be used by several nodes, or by none):
 	int cameraIndex = 0;
 	for (auto& x : state.gltfModel.cameras)
 	{
-		if (!x.type.compare("orthographic"))
-			continue;
-		Entity entity = scene.cameras.GetEntity(cameraIndex);
-		CameraComponent& camera = scene.cameras[cameraIndex++];
-
-		if (x.perspective.aspectRatio > 0)
+		for (auto [it, end] = state.cameraMap.equal_range(cameraIndex); it != end; it++)
 		{
-			camera.width = float(x.perspective.aspectRatio);
-			camera.height = 1.f;
-		}
-		camera.fov = (float)x.perspective.yfov;
-		camera.zFarP = (float)x.perspective.zfar;
-		camera.zNearP = (float)x.perspective.znear;
+			Entity entity = it->second;
+			CameraComponent& camera = *scene.cameras.GetComponent(entity); // (the camera components are not in the order of the glTF cameras)
 
-		ImportMetadata(state, entity, x.extras);
+			if (!x.type.compare("orthographic"))
+			{
+				// In gltf, xmag and ymag are half of the width and height of the view, in engine, ortho_vertical_size is the whole height:
+				if (x.orthographic.xmag != 0 && x.orthographic.ymag != 0)
+				{
+					camera.width = float(x.orthographic.xmag / x.orthographic.ymag);
+					camera.height = 1.f;
+					camera.ortho_vertical_size = float(x.orthographic.ymag * 2);
+				}
+				camera.zFarP = (float)x.orthographic.zfar;
+				camera.zNearP = (float)x.orthographic.znear;
+				camera.SetOrtho(true);
+			}
+			else
+			{
+				if (x.perspective.aspectRatio > 0)
+				{
+					camera.width = float(x.perspective.aspectRatio);
+					camera.height = 1.f;
+				}
+				camera.fov = (float)x.perspective.yfov;
+				if (x.perspective.zfar > 0) // without zfar, the gltf projection is infinite, the engine keeps its own far plane
+				{
+					camera.zFarP = (float)x.perspective.zfar;
+				}
+				camera.zNearP = (float)x.perspective.znear;
+			}
+
+			ImportMetadata(state, entity, x.extras);
+		}
+		cameraIndex++;
 	}
 
 	// https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Vendor/EXT_lights_image_based/README.md
@@ -4901,12 +4945,25 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		if(nameComponent != nullptr)
 			camera_builder.name = nameComponent->name;
 
-		camera_builder.type = "perspective";
-		camera_builder.perspective.aspectRatio = camera.width/camera.height;
-		camera_builder.perspective.yfov = camera.fov;
-		camera_builder.perspective.zfar = camera.zFarP;
-		camera_builder.perspective.znear = camera.zNearP;
+		if(camera.IsOrtho())
+		{
+			// In gltf, xmag and ymag are half of the width and height of the view, in engine, ortho_vertical_size is the whole height
+			camera_builder.type = "orthographic";
+			camera_builder.orthographic.ymag = camera.ortho_vertical_size * 0.5;
+			camera_builder.orthographic.xmag = camera_builder.orthographic.ymag * camera.width / camera.height;
+			camera_builder.orthographic.zfar = camera.zFarP;
+			camera_builder.orthographic.znear = camera.zNearP;
+		}
+		else
+		{
+			camera_builder.type = "perspective";
+			camera_builder.perspective.aspectRatio = camera.width/camera.height;
+			camera_builder.perspective.yfov = camera.fov;
+			camera_builder.perspective.zfar = camera.zFarP;
+			camera_builder.perspective.znear = camera.zNearP;
+		}
 
+		// The nodes refer to this camera by the index of the camera component (see node_builder.camera)
 		state.gltfModel.cameras.push_back(camera_builder);
 	}
 
