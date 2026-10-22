@@ -149,6 +149,7 @@ struct LoaderState
 	Scene* scene;
 	wi::unordered_map<int, Entity> entityMap;  // node -> entity
 	std::unordered_multimap<int, Entity> punctualLightMap;  // KHR_lights_punctual -> entities
+	int lightID = 0; // numbers the names of the light nodes that have no name
 	Entity rootEntity = INVALID_ENTITY;
 
 	//Export states
@@ -259,8 +260,19 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 	if (ext_lights_punctual != node.extensions.end())
 	{
 		// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_lights_punctual
-		entity = scene.Entity_CreateLight(""); // light component will be filled later
 		int index = ext_lights_punctual->second.Get("light").Get<int>();
+		// The entity is the node, so it gets the node's name (animations, scripts and the humanoid find nodes by name),
+		//	the name of the light (which several nodes can share) is only used when the node has none:
+		std::string name = node.name;
+		if (name.empty() && index >= 0 && index < (int)state.gltfModel.lights.size())
+		{
+			name = state.gltfModel.lights[index].name;
+		}
+		if (name.empty())
+		{
+			name = "light" + std::to_string(state.lightID++);
+		}
+		entity = scene.Entity_CreateLight(name); // light component will be filled later
 		state.punctualLightMap.insert({ index, entity });
 	}
 
@@ -1735,8 +1747,6 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 		{
 			Entity entity = it->second;
 			LightComponent& light = *scene.lights.GetComponent(entity); // (the light components are not in the order of the glTF lights)
-			NameComponent& name = *scene.names.GetComponent(entity);
-			name = x.name;
 
 			if (!x.type.compare("spot"))
 			{

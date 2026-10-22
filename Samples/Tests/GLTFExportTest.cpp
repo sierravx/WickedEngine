@@ -16,9 +16,11 @@
 #include <string>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <utility>
 
 // Regression test for the animation export of the editor's glTF exporter: only channels that glTF can hold are written,
-//	retargeted channels are baked, the file is valid, and the scene is restored after the export.
+//	retargeted channels are baked, the file is valid, and the scene is restored after the export. Also the import of glTF
+//	lights: the rotation keys of light nodes, and the names of light nodes (also after an export and an import).
 //	The exporter updates the scene, which needs a graphics device: the test runs in a child process that creates a Vulkan
 //	device (like Mesa's software lavapipe), and it is skipped if there is none.
 
@@ -240,6 +242,94 @@ namespace
 		}
 	}
 
+	// The names of the lights of a scene with the type of each light
+	std::multiset<std::pair<std::string, int>> LightNames(const Scene& scene)
+	{
+		std::multiset<std::pair<std::string, int>> names;
+		for (size_t i = 0; i < scene.lights.GetCount(); ++i)
+		{
+			const NameComponent* name = scene.names.GetComponent(scene.lights.GetEntity(i));
+			names.insert({ name != nullptr ? name->name : std::string("<no name component>"), int(scene.lights[i].GetType()) });
+		}
+		return names;
+	}
+	std::string ToString(const std::multiset<std::pair<std::string, int>>& names)
+	{
+		std::string result;
+		for (auto& [name, type] : names)
+		{
+			result += (result.empty() ? "\"" : ", \"") + name + "\" (type " + std::to_string(type) + ")";
+		}
+		return "{ " + result + " }";
+	}
+
+	// Import: a light entity is the node, it gets the node's name and not the name of the light (which several nodes can
+	//	share and which can be missing). The light's name is only used for a node without a name. The names stay the same
+	//	after an export and an import.
+	void CheckLightNodeNames()
+	{
+		const char* names_file = "GLTFImportTest_light_names.gltf";
+		bool written = false;
+		if (FILE* gltf = fopen(names_file, "w"))
+		{
+			written = fputs(R"({
+	"asset": { "version": "2.0" },
+	"extensionsUsed": [ "KHR_lights_punctual" ],
+	"extensions": { "KHR_lights_punctual": { "lights": [
+		{ "type": "spot", "name": "SpotDefinition", "spot": {} },
+		{ "type": "point" },
+		{ "type": "directional", "name": "SharedDefinition" }
+	] } },
+	"scene": 0,
+	"scenes": [ { "nodes": [ 0, 1, 2, 3, 4, 5 ] } ],
+	"nodes": [
+		{ "name": "SpotNode", "extensions": { "KHR_lights_punctual": { "light": 0 } } },
+		{ "name": "UnnamedLightNode", "extensions": { "KHR_lights_punctual": { "light": 1 } } },
+		{ "name": "SharedNodeA", "extensions": { "KHR_lights_punctual": { "light": 2 } } },
+		{ "name": "SharedNodeB", "extensions": { "KHR_lights_punctual": { "light": 2 } } },
+		{ "extensions": { "KHR_lights_punctual": { "light": 2 } } },
+		{ "extensions": { "KHR_lights_punctual": { "light": 1 } } }
+	]
+})", gltf) >= 0;
+			written &= fclose(gltf) == 0;
+		}
+		Check(written, "the glTF file of the light name test could not be written");
+		if (!written)
+		{
+			std::remove(names_file);
+			return;
+		}
+
+		Scene scene;
+		ImportModel_GLTF(names_file, scene);
+		std::remove(names_file);
+
+		const int spot = LightComponent::SPOT;
+		const int point = LightComponent::POINT;
+		const int directional = LightComponent::DIRECTIONAL;
+		const std::multiset<std::pair<std::string, int>> expected = {
+			{ "SpotNode", spot }, // (not the name of its light)
+			{ "UnnamedLightNode", point }, // (its light has no name)
+			{ "SharedNodeA", directional }, { "SharedNodeB", directional }, // (they share a light)
+			{ "SharedDefinition", directional }, // a node without a name: the name of its light
+			{ "light0", point }, // a node without a name, the light of which has no name either
+		};
+		const std::multiset<std::pair<std::string, int>> imported = LightNames(scene);
+		Check(imported == expected, "the lights were not named after their nodes: " + ToString(imported) + " instead of " + ToString(expected));
+		const Entity spot_node = scene.Entity_FindByName("SpotNode");
+		Check(spot_node != INVALID_ENTITY && scene.lights.Contains(spot_node), "the light could not be found by the name of its node");
+		Check(scene.Entity_FindByName("SpotDefinition") == INVALID_ENTITY, "an entity was named after the light instead of its node");
+
+		// Export and import back:
+		RemoveOutputFiles();
+		ExportModel_GLTF(output_file, scene);
+		Scene reimported;
+		ImportModel_GLTF(output_file, reimported);
+		RemoveOutputFiles();
+		const std::multiset<std::pair<std::string, int>> names = LightNames(reimported);
+		Check(names == expected, "the names of the light nodes changed after an export and an import: " + ToString(names) + " instead of " + ToString(expected));
+	}
+
 	int RunExport(int device_created_pipe)
 	{
 		wi::jobsystem::Initialize();
@@ -250,6 +340,7 @@ namespace
 		close(device_created_pipe);
 
 		CheckSharedSamplerImport();
+		CheckLightNodeNames();
 
 		RemoveOutputFiles(); // the files of an earlier run must not be checked
 
