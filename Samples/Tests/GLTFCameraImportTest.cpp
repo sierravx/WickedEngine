@@ -92,7 +92,7 @@ namespace
 	"extensionsUsed": [ "KHR_lights_punctual" ],
 	"extensions": { "KHR_lights_punctual": { "lights": [ { "type": "point", "name": "Lamp" } ] } },
 	"scene": 0,
-	"scenes": [ { "nodes": [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ] } ],
+	"scenes": [ { "nodes": [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12 ] } ],
 	"nodes": [
 		{ "name": "FarNode", "camera": 2 },
 		{ "name": "NearNode", "camera": 1 },
@@ -105,7 +105,10 @@ namespace
 		{ "name": "SkinnedCameraNode", "camera": 8, "mesh": 1, "skin": 0, "translation": [ 4, 5, 6 ], "children": [ 10 ], "extras": { "label": "node", "node": 1 },
 			"extensions": { "KHR_lights_punctual": { "light": 0 } } },
 		{ "name": "Joint" },
-		{ "name": "Attachment", "translation": [ 0, 1, 0 ] }
+		{ "name": "Attachment", "translation": [ 0, 1, 0 ] },
+		{ "name": "SkinnedParent", "mesh": 2, "skin": 1, "translation": [ 7, 0, 0 ], "children": [ 13 ] },
+		{ "name": "OtherJoint" },
+		{ "name": "SkinnedChild", "translation": [ 0, 0, 1 ] }
 	],
 	"cameras": [
 		{ "name": "Ortho", "type": "orthographic", "orthographic": { "xmag": 3, "ymag": 2, "znear": 0.5, "zfar": 50 } },
@@ -120,9 +123,10 @@ namespace
 	],
 	"meshes": [
 		{ "name": "Triangle", "primitives": [ { "attributes": { "POSITION": 0 } } ] },
-		{ "name": "SkinnedTriangle", "primitives": [ { "attributes": { "POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2 } } ] }
+		{ "name": "SkinnedTriangle", "primitives": [ { "attributes": { "POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2 } } ] },
+		{ "name": "OtherSkinnedTriangle", "primitives": [ { "attributes": { "POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2 } } ] }
 	],
-	"skins": [ { "name": "Skin", "joints": [ 9 ], "inverseBindMatrices": 3, "extras": { "label": "skin", "skin": 1 } } ],
+	"skins": [ { "name": "Skin", "joints": [ 9 ], "inverseBindMatrices": 3, "extras": { "label": "skin", "skin": 1 } }, { "name": "OtherSkin", "joints": [ 12 ] } ],
 	"buffers": [ { "byteLength": 192, "uri": "GLTFCameraImportTest_cameras.bin" } ],
 	"bufferViews": [
 		{ "buffer": 0, "byteOffset": 0, "byteLength": 36 },
@@ -254,6 +258,10 @@ namespace
 				what + ": the child of a node with a skinned mesh is not under the node" + when);
 		};
 		check_skinned_node(XMFLOAT3(4, 5, -6), "");
+		// The child of a skinned mesh node without a camera or a light is under the node's transform too:
+		const TransformComponent* skinned_child = scene.transforms.GetComponent(scene.Entity_FindByName("SkinnedChild"));
+		Check(skinned_child != nullptr && Near(skinned_child->world._41, 7) && Near(skinned_child->world._42, 0) && Near(skinned_child->world._43, -1),
+			what + ": the child of a node with a skinned mesh (without a camera or a light) is not under the node");
 
 		// The translation keys of the skinned mesh node move its camera to the keys (not by the keys from the node's translation).
 		//	The timer is evaluated when it changes, also if the animation doesn't play; at the first key it is back at the node.

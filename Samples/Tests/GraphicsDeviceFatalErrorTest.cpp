@@ -20,7 +20,8 @@
 namespace
 {
 	constexpr int CONSTRUCTOR_RETURNED = 3;
-	const char* child_output = "GraphicsDeviceFatalErrorTest_child.log"; // what the child process writes
+	// What the child process writes, in a file of this run:
+	const std::string child_output = "GraphicsDeviceFatalErrorTest_child_" + std::to_string(getpid()) + ".log";
 
 	int CreateDeviceWithoutDriver()
 	{
@@ -55,7 +56,7 @@ int main(int argc, char** argv)
 	if (pid == 0)
 	{
 		// The output of the child goes to a file, which the parent checks:
-		const int output = open(child_output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		const int output = open(child_output.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
 		if (output >= 0)
 		{
 			dup2(output, STDOUT_FILENO);
@@ -75,7 +76,7 @@ int main(int argc, char** argv)
 		{
 			kill(pid, SIGKILL);
 			waitpid(pid, &status, 0);
-			std::remove(child_output);
+			std::remove(child_output.c_str());
 			std::cerr << "GraphicsDeviceFatalError test failed: device creation did not end in 60 seconds\n";
 			return 1;
 		}
@@ -90,7 +91,7 @@ int main(int argc, char** argv)
 		text << file.rdbuf();
 		output = text.str();
 	}
-	std::remove(child_output);
+	std::remove(child_output.c_str());
 	std::cout << output;
 
 #ifndef NDEBUG

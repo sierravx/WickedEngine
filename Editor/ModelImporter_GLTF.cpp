@@ -285,7 +285,7 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 	const int lightIndex = node.light;
 	const bool has_light = lightIndex >= 0 && lightIndex < (int)state.gltfModel.lights.size(); // (a node can refer to a light that doesn't exist)
 	// The camera, the light and the children of a skinned mesh node keep the node's transform and animation (only the skinned
-	//	mesh ignores them, see below). With a camera or a light, they are put on an entity with that transform, next to the armature:
+	//	mesh ignores them, see below), they are put on an entity with that transform, next to the armature:
 	Entity skinnedNodeEntity = INVALID_ENTITY;
 	auto create_skinned_node_entity = [&]() {
 		skinnedNodeEntity = CreateEntity();
@@ -327,7 +327,7 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 			object.meshID = meshEntity;
 			scene.Component_Attach(objectEntity, entity, true);
 
-			if (skinnedNodeEntity == INVALID_ENTITY && has_light)
+			if (skinnedNodeEntity == INVALID_ENTITY && (has_light || !node.children.empty()))
 			{
 				create_skinned_node_entity(); // (after the object, so the node's name finds the object, the light is on a child)
 			}
