@@ -2260,6 +2260,37 @@ namespace wi::scene
 		return PathDataType::Event;
 	}
 
+	XMVECTOR AnimationComponent::RetargetSourceData::RetargetValue(const TransformComponent& source, AnimationChannel::Path path, const XMVECTOR& value) const
+	{
+		TransformComponent transform = source;
+		switch (path)
+		{
+		case AnimationChannel::Path::TRANSLATION:
+			XMStoreFloat3(&transform.translation_local, value);
+			break;
+		case AnimationChannel::Path::ROTATION:
+			XMStoreFloat4(&transform.rotation_local, value);
+			break;
+		case AnimationChannel::Path::SCALE:
+			XMStoreFloat3(&transform.scale_local, value);
+			break;
+		default:
+			return value;
+		}
+		const XMMATRIX localMatrix = XMLoadFloat4x4(&dstRelativeMatrix) * transform.GetLocalMatrix() * XMLoadFloat4x4(&srcRelativeParentMatrix);
+		XMVECTOR S, R, T; // matrix decompose destinations
+		wi::math::DecomposeTransform(&S, &R, &T, localMatrix);
+		switch (path)
+		{
+		case AnimationChannel::Path::TRANSLATION:
+			return T;
+		case AnimationChannel::Path::ROTATION:
+			return R;
+		default:
+			return S;
+		}
+	}
+
 	void SoftBodyPhysicsComponent::CreateFromMesh(MeshComponent& mesh)
 	{
 		if (weights.size() != mesh.vertex_positions.size())

@@ -1830,6 +1830,12 @@ namespace wi::scene
 			wi::ecs::Entity source = wi::ecs::INVALID_ENTITY;
 			XMFLOAT4X4 dstRelativeMatrix = wi::math::IDENTITY_MATRIX;
 			XMFLOAT4X4 srcRelativeParentMatrix = wi::math::IDENTITY_MATRIX;
+
+			// Retargets an animated value of the source to the destination: the source's local transform with the value in place of
+			//	its translation, rotation or scale (by path) is transferred as dstRelativeMatrix * local matrix * srcRelativeParentMatrix,
+			//	and the same part is decomposed from that with wi::math::DecomposeTransform(). Values of other paths are returned unchanged.
+			//	source is the transform of the source entity, in the scene that holds it (the scene of the animation data).
+			XMVECTOR RetargetValue(const TransformComponent& source, AnimationChannel::Path path, const XMVECTOR& value) const;
 		};
 
 		wi::vector<AnimationChannel> channels;

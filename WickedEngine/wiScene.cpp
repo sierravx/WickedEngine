@@ -2616,27 +2616,24 @@ namespace wi::scene
 					{
 						target_transform->SetDirty();
 
+						// Retargeting transfer from source to destination, the source transform is in the scene of the animation data:
+						const AnimationComponent::RetargetSourceData* retarget = nullptr;
+						const TransformComponent* source_transform = nullptr;
+						if (channel.retargetIndex >= 0 && channel.retargetIndex < (int)animation.retargets.size())
+						{
+							retarget = &animation.retargets[channel.retargetIndex];
+							source_transform = data_scene->transforms.GetComponent(retarget->source);
+						}
+
 						switch (channel.path)
 						{
 						case AnimationComponent::AnimationChannel::Path::TRANSLATION:
 						{
 							const XMVECTOR aT = XMLoadFloat3(&target_transform->translation_local);
 							XMVECTOR bT = XMLoadFloat3(&interpolator.f3);
-							if (channel.retargetIndex >= 0 && channel.retargetIndex < (int)animation.retargets.size())
+							if (source_transform != nullptr)
 							{
-								// Retargeting transfer from source to destination:
-								const AnimationComponent::RetargetSourceData& retarget = animation.retargets[channel.retargetIndex];
-								TransformComponent* source_transform = data_scene->transforms.GetComponent(retarget.source);
-								if (source_transform != nullptr)
-								{
-									XMMATRIX dstRelativeMatrix = XMLoadFloat4x4(&retarget.dstRelativeMatrix);
-									XMMATRIX srcRelativeParentMatrix = XMLoadFloat4x4(&retarget.srcRelativeParentMatrix);
-									XMVECTOR S, R; // matrix decompose destinations
-									TransformComponent transform = *source_transform;
-									XMStoreFloat3(&transform.translation_local, bT);
-									XMMATRIX localMatrix = dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix;
-									XMMatrixDecompose(&S, &R, &bT, localMatrix);
-								}
+								bT = retarget->RetargetValue(*source_transform, channel.path, bT);
 							}
 							const XMVECTOR T = XMVectorLerp(aT, bT, t);
 							if (!isRootBone)
@@ -2679,21 +2676,9 @@ namespace wi::scene
 						{
 							const XMVECTOR aR = XMLoadFloat4(&target_transform->rotation_local);
 							XMVECTOR bR = XMLoadFloat4(&interpolator.f4);
-							if (channel.retargetIndex >= 0 && channel.retargetIndex < (int)animation.retargets.size())
+							if (source_transform != nullptr)
 							{
-								// Retargeting transfer from source to destination:
-								const AnimationComponent::RetargetSourceData& retarget = animation.retargets[channel.retargetIndex];
-								TransformComponent* source_transform = data_scene->transforms.GetComponent(retarget.source);
-								if (source_transform != nullptr)
-								{
-									XMMATRIX dstRelativeMatrix = XMLoadFloat4x4(&retarget.dstRelativeMatrix);
-									XMMATRIX srcRelativeParentMatrix = XMLoadFloat4x4(&retarget.srcRelativeParentMatrix);
-									XMVECTOR S, T; // matrix decompose destinations
-									TransformComponent transform = *source_transform;
-									XMStoreFloat4(&transform.rotation_local, bR);
-									XMMATRIX localMatrix = dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix;
-									wi::math::DecomposeTransform(&S, &bR, &T, localMatrix);
-								}
+								bR = retarget->RetargetValue(*source_transform, channel.path, bR);
 							}
 							const XMVECTOR R = XMQuaternionSlerp(aR, bR, t);
 							if (!isRootBone)
@@ -2737,21 +2722,9 @@ namespace wi::scene
 						{
 							const XMVECTOR aS = XMLoadFloat3(&target_transform->scale_local);
 							XMVECTOR bS = XMLoadFloat3(&interpolator.f3);
-							if (channel.retargetIndex >= 0 && channel.retargetIndex < (int)animation.retargets.size())
+							if (source_transform != nullptr)
 							{
-								// Retargeting transfer from source to destination:
-								const AnimationComponent::RetargetSourceData& retarget = animation.retargets[channel.retargetIndex];
-								TransformComponent* source_transform = data_scene->transforms.GetComponent(retarget.source);
-								if (source_transform != nullptr)
-								{
-									XMMATRIX dstRelativeMatrix = XMLoadFloat4x4(&retarget.dstRelativeMatrix);
-									XMMATRIX srcRelativeParentMatrix = XMLoadFloat4x4(&retarget.srcRelativeParentMatrix);
-									XMVECTOR R, T; // matrix decompose destinations
-									TransformComponent transform = *source_transform;
-									XMStoreFloat3(&transform.scale_local, bS);
-									XMMATRIX localMatrix = dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix;
-									XMMatrixDecompose(&bS, &R, &T, localMatrix);
-								}
+								bS = retarget->RetargetValue(*source_transform, channel.path, bS);
 							}
 							const XMVECTOR S = XMVectorLerp(aS, bS, t);
 							XMStoreFloat3(&target_transform->scale_local, S);
@@ -9355,8 +9328,10 @@ namespace wi::scene
 							XMMATRIX dstMatrix = transform_dest->GetLocalMatrix() * dstParentMatrix;
 							XMMATRIX inverseDstParentMatrix = XMMatrixInverse(nullptr, dstParentMatrix);
 
-							XMMATRIX dstRelativeMatrix = dstMatrix * inverseSrcMatrix;
-							XMMATRIX srcRelativeParentMatrix = srcParentMatrix * inverseDstParentMatrix;
+							AnimationComponent::RetargetSourceData retarget;
+							retarget.source = bone_source;
+							XMStoreFloat4x4(&retarget.dstRelativeMatrix, dstMatrix * inverseSrcMatrix);
+							XMStoreFloat4x4(&retarget.srcRelativeParentMatrix, srcParentMatrix * inverseDstParentMatrix);
 
 							if (bake_data)
 							{
@@ -9369,41 +9344,22 @@ namespace wi::scene
 								auto& animation_data = src_scene->animation_datas.Contains(sampler.data) ? *src_scene->animation_datas.GetComponent(sampler.data) : sampler.backwards_compatibility_data;
 								retarget_animation_data = animation_data;
 
-								XMVECTOR S, R, T; // matrix decompose destinations
-
+								// The keys are retargeted like the values of a channel that is not baked (see RunAnimationUpdateSystem()):
 								switch (channel.path)
 								{
+								case AnimationComponent::AnimationChannel::Path::TRANSLATION:
 								case AnimationComponent::AnimationChannel::Path::SCALE:
 									for (size_t offset = 0; offset < retarget_animation_data.keyframe_data.size(); offset += 3)
 									{
 										XMFLOAT3* data = (XMFLOAT3*)&retarget_animation_data.keyframe_data[offset];
-										TransformComponent transform = *transform_source;
-										transform.scale_local = *data;
-										XMMATRIX localMatrix = dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix;
-										XMMatrixDecompose(&S, &R, &T, localMatrix);
-										XMStoreFloat3(data, S);
+										XMStoreFloat3(data, retarget.RetargetValue(*transform_source, channel.path, XMLoadFloat3(data)));
 									}
 									break;
 								case AnimationComponent::AnimationChannel::Path::ROTATION:
 									for (size_t offset = 0; offset < retarget_animation_data.keyframe_data.size(); offset += 4)
 									{
 										XMFLOAT4* data = (XMFLOAT4*)&retarget_animation_data.keyframe_data[offset];
-										TransformComponent transform = *transform_source;
-										transform.rotation_local = *data;
-										XMMATRIX localMatrix = dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix;
-										wi::math::DecomposeTransform(&S, &R, &T, localMatrix);
-										XMStoreFloat4(data, R);
-									}
-									break;
-								case AnimationComponent::AnimationChannel::Path::TRANSLATION:
-									for (size_t offset = 0; offset < retarget_animation_data.keyframe_data.size(); offset += 3)
-									{
-										XMFLOAT3* data = (XMFLOAT3*)&retarget_animation_data.keyframe_data[offset];
-										TransformComponent transform = *transform_source;
-										transform.translation_local = *data;
-										XMMATRIX localMatrix = dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix;
-										XMMatrixDecompose(&S, &R, &T, localMatrix);
-										XMStoreFloat3(data, T);
+										XMStoreFloat4(data, retarget.RetargetValue(*transform_source, channel.path, XMLoadFloat4(data)));
 									}
 									break;
 								default:
@@ -9414,10 +9370,7 @@ namespace wi::scene
 							{
 								// Don't bake retarget data, but inform the animation channel of original source data:
 								retarget_channel.retargetIndex = (int)animation.retargets.size();
-								AnimationComponent::RetargetSourceData& retarget = animation.retargets.emplace_back();
-								retarget.source = bone_source;
-								XMStoreFloat4x4(&retarget.dstRelativeMatrix, dstRelativeMatrix);
-								XMStoreFloat4x4(&retarget.srcRelativeParentMatrix, srcRelativeParentMatrix);
+								animation.retargets.push_back(retarget);
 							}
 						}
 
