@@ -2537,7 +2537,7 @@ namespace wi::scene
 							default:
 							case AnimationComponent::AnimationChannel::PathDataType::Float:
 							{
-								assert(animationdata->keyframe_data.size() == animationdata->keyframe_times.size());
+								assert(animationdata->keyframe_data.size() == animationdata->keyframe_times.size() * 3);
 								float vLeft = animationdata->keyframe_data[keyLeft * 3 + 1];
 								float vLeftTanOut = animationdata->keyframe_data[keyLeft * 3 + 2];
 								float vRightTanIn = animationdata->keyframe_data[keyRight * 3 + 0];
