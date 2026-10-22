@@ -102,8 +102,10 @@ namespace
 		{ "name": "InfiniteNode", "camera": 5 },
 		{ "name": "CameraLightNode", "camera": 6, "translation": [ 1, 2, 3 ], "extensions": { "KHR_lights_punctual": { "light": 0 } } },
 		{ "name": "MeshCameraNode", "camera": 7, "mesh": 0 },
-		{ "name": "SkinnedCameraNode", "camera": 8, "mesh": 1, "skin": 0, "translation": [ 4, 5, 6 ], "extras": { "label": "node", "node": 1 } },
-		{ "name": "Joint" }
+		{ "name": "SkinnedCameraNode", "camera": 8, "mesh": 1, "skin": 0, "translation": [ 4, 5, 6 ], "children": [ 10 ], "extras": { "label": "node", "node": 1 },
+			"extensions": { "KHR_lights_punctual": { "light": 0 } } },
+		{ "name": "Joint" },
+		{ "name": "Attachment", "translation": [ 0, 1, 0 ] }
 	],
 	"cameras": [
 		{ "name": "Ortho", "type": "orthographic", "orthographic": { "xmag": 3, "ymag": 2, "znear": 0.5, "zfar": 50 } },
@@ -208,16 +210,29 @@ namespace
 		}
 	}
 
-	// The camera of a node with a light or a mesh is on the entity of the node (of a skinned mesh, on an entity with the node's transform)
+	// The light on a child of the entity
+	const LightComponent* LightUnder(const Scene& scene, Entity parent)
+	{
+		for (size_t i = 0; i < scene.lights.GetCount(); ++i)
+		{
+			const HierarchyComponent* hierarchy = scene.hierarchy.GetComponent(scene.lights.GetEntity(i));
+			if (hierarchy != nullptr && hierarchy->parentID == parent)
+				return &scene.lights[i];
+		}
+		return nullptr;
+	}
+
+	// The camera of a node with a light or a mesh is on the entity of the node (of a skinned mesh, on an entity with the node's
+	//	transform and animation, with the node's light and children)
 	void CheckCameraNodes(Scene& scene, const std::string& what)
 	{
 		// The light is on a child, which does not turn the camera (the glTF camera looks to -Z, mirrored to +Z in the engine):
 		const Entity camera_light = scene.Entity_FindByName("CameraLightNode");
 		const CameraComponent* camera = scene.cameras.GetComponent(camera_light);
-		const HierarchyComponent* light_hierarchy = scene.lights.GetCount() == 1 ? scene.hierarchy.GetComponent(scene.lights.GetEntity(0)) : nullptr;
+		Check(scene.lights.GetCount() == 2, what + ": expected the 2 lights of the camera nodes, got " + std::to_string(scene.lights.GetCount()));
 		Check(scene.hierarchy.Contains(camera_light) && camera != nullptr && Near(camera->Eye.x, 1) && Near(camera->Eye.y, 2) && Near(camera->Eye.z, -3) &&
 			Near(camera->At.x, 0) && Near(camera->At.y, 0) && Near(camera->At.z, 1), what + ": the camera of a node with a light is not on the node in the hierarchy");
-		Check(light_hierarchy != nullptr && light_hierarchy->parentID == camera_light, what + ": the light of a node with a camera is not on a child of the node");
+		Check(LightUnder(scene, camera_light) != nullptr, what + ": the light of a node with a camera is not on a child of the node");
 
 		Check(scene.objects.Contains(scene.Entity_FindByName("MeshCameraNode")), what + ": the camera of a node with a mesh is not on the object");
 		const ObjectComponent* skinned = ObjectNamed(scene, "SkinnedCameraNode");
@@ -227,7 +242,18 @@ namespace
 		const CameraComponent* skinned_camera = CameraNamed(scene, "SkinnedCameraNode");
 		Check(skinned_camera != nullptr && Near(skinned_camera->Eye.x, 4) && Near(skinned_camera->Eye.y, 5) && Near(skinned_camera->Eye.z, -6),
 			what + ": the camera of a node with a skinned mesh does not have the node's transform");
-		Check(scene.cameras.GetComponent(scene.Entity_FindByName("SkinnedCameraNode")) == skinned_camera, what + ": the name of a skinned mesh node does not find its camera");
+		const Entity skinned_node = scene.Entity_FindByName("SkinnedCameraNode");
+		Check(scene.cameras.GetComponent(skinned_node) == skinned_camera, what + ": the name of a skinned mesh node does not find its camera");
+		// The light and the children of the skinned mesh node are at the node too:
+		auto check_skinned_node = [&](const XMFLOAT3& expected, const std::string& when) {
+			const LightComponent* skinned_light = LightUnder(scene, skinned_node);
+			Check(skinned_light != nullptr && Near(skinned_light->position.x, expected.x) && Near(skinned_light->position.y, expected.y) && Near(skinned_light->position.z, expected.z),
+				what + ": the light of a node with a skinned mesh is not at the node" + when);
+			const TransformComponent* attachment = scene.transforms.GetComponent(scene.Entity_FindByName("Attachment"));
+			Check(attachment != nullptr && Near(attachment->world._41, expected.x) && Near(attachment->world._42, expected.y + 1) && Near(attachment->world._43, expected.z),
+				what + ": the child of a node with a skinned mesh is not under the node" + when);
+		};
+		check_skinned_node(XMFLOAT3(4, 5, -6), "");
 
 		// The translation keys of the skinned mesh node move its camera to the keys (not by the keys from the node's translation).
 		//	The timer is evaluated when it changes, also if the animation doesn't play; at the first key it is back at the node.
@@ -247,6 +273,7 @@ namespace
 			scene.Update(0);
 			const CameraComponent* moved = CameraNamed(scene, "SkinnedCameraNode");
 			Check(moved != nullptr && Near(moved->Eye.x, 1) && Near(moved->Eye.y, 2) && Near(moved->Eye.z, -8), what + ": the translation keys of a skinned mesh node did not move its camera to the keys");
+			check_skinned_node(XMFLOAT3(1, 2, -8), " at the last key");
 			move->timer = 0;
 			scene.Update(0);
 		}

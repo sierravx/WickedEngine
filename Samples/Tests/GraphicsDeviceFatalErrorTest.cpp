@@ -2,9 +2,14 @@
 #include "wiGraphicsDevice_Vulkan.h"
 
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
+#include <fstream>
 #include <iostream>
+#include <sstream>
+#include <string>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -15,6 +20,7 @@
 namespace
 {
 	constexpr int CONSTRUCTOR_RETURNED = 3;
+	const char* child_output = "GraphicsDeviceFatalErrorTest_child.log"; // what the child process writes
 
 	int CreateDeviceWithoutDriver()
 	{
@@ -48,6 +54,14 @@ int main(int argc, char** argv)
 	}
 	if (pid == 0)
 	{
+		// The output of the child goes to a file, which the parent checks:
+		const int output = open(child_output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (output >= 0)
+		{
+			dup2(output, STDOUT_FILENO);
+			dup2(output, STDERR_FILENO);
+			close(output);
+		}
 		// exec instead of continuing in the fork, so that the child starts like a fresh application
 		execl("/proc/self/exe", argv[0], "--child", (char*)nullptr);
 		_exit(127);
@@ -61,6 +75,7 @@ int main(int argc, char** argv)
 		{
 			kill(pid, SIGKILL);
 			waitpid(pid, &status, 0);
+			std::remove(child_output);
 			std::cerr << "GraphicsDeviceFatalError test failed: device creation did not end in 60 seconds\n";
 			return 1;
 		}
@@ -68,11 +83,23 @@ int main(int argc, char** argv)
 		waited_ms += 10;
 	}
 
-#ifndef NDEBUG
-	// In debug builds the failed Vulkan call asserts (vulkan_check()) before the device ends the process, which also ends it:
-	if (WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT)
+	std::string output;
 	{
-		std::cout << "GraphicsDeviceFatalError test passed (the failed device creation asserted in this debug build)\n";
+		std::ifstream file(child_output);
+		std::stringstream text;
+		text << file.rdbuf();
+		output = text.str();
+	}
+	std::remove(child_output);
+	std::cout << output;
+
+#ifndef NDEBUG
+	// In debug builds the failed Vulkan call asserts (vulkan_check()) before the device ends the process, which also ends it.
+	//	Only the assert of the failed instance creation (which logs the failed call first) is accepted:
+	const bool instance_failed = output.find("vkCreateInstance") != std::string::npos || output.find("volkInitialize") != std::string::npos;
+	if (WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT && instance_failed && output.find("Assertion") != std::string::npos)
+	{
+		std::cout << "GraphicsDeviceFatalError test passed (the failed instance creation asserted in this debug build)\n";
 		return 0;
 	}
 #endif

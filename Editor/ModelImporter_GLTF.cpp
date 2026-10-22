@@ -154,7 +154,7 @@ struct LoaderState
 	wi::unordered_set<int> jointNodes; // the nodes that are joints of a skin
 	wi::unordered_set<Entity> rotatedLights; // the light nodes that got the light rotation in their own rotation (and rotation keys)
 	wi::unordered_map<int, Entity> nodeTransformMap; // node -> entity with the node's transform, when it is not the entity of the node (skinned mesh nodes)
-	wi::unordered_set<int> scaleAnimatedNodes; // the nodes that have scale animation
+	wi::unordered_set<int> mirroringScaleNodes; // the nodes with scale keys in which the y and z scales have different signs
 	int lightID = 0; // numbers the names of the lights that have no name
 	Entity rootEntity = INVALID_ENTITY;
 
@@ -281,16 +281,18 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 	Scene& scene = *state.scene;
 	Entity entity = INVALID_ENTITY;
 	Entity objectEntity = INVALID_ENTITY;
-	auto ext_lights_punctual = node.extensions.find("KHR_lights_punctual");
-	int lightIndex = -1;
-	if (ext_lights_punctual != node.extensions.end())
-	{
-		lightIndex = ext_lights_punctual->second.Get("light").Get<int>();
-	}
+	// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_lights_punctual (tinygltf reads the node's light)
+	const int lightIndex = node.light;
 	const bool has_light = lightIndex >= 0 && lightIndex < (int)state.gltfModel.lights.size(); // (a node can refer to a light that doesn't exist)
-	// The camera and the light of a skinned mesh node keep the node's transform and animation (only the skinned mesh ignores
-	//	them, see below), they are put on an entity with that transform, next to the armature:
+	// The camera, the light and the children of a skinned mesh node keep the node's transform and animation (only the skinned
+	//	mesh ignores them, see below). With a camera or a light, they are put on an entity with that transform, next to the armature:
 	Entity skinnedNodeEntity = INVALID_ENTITY;
+	auto create_skinned_node_entity = [&]() {
+		skinnedNodeEntity = CreateEntity();
+		scene.transforms.Create(skinnedNodeEntity);
+		scene.names.Create(skinnedNodeEntity) = node.name;
+		state.nodeTransformMap[nodeIndex] = skinnedNodeEntity;
+	};
 
 	if(node.mesh >= 0)
 	{
@@ -314,13 +316,9 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 			}
 			mesh->armatureID = entity;
 
-			if (node.camera >= 0 || has_light)
+			if (node.camera >= 0)
 			{
-				// (created before the object, so the node's name finds the camera or light)
-				skinnedNodeEntity = CreateEntity();
-				scene.transforms.Create(skinnedNodeEntity);
-				scene.names.Create(skinnedNodeEntity) = node.name;
-				state.nodeTransformMap[nodeIndex] = skinnedNodeEntity;
+				create_skinned_node_entity(); // (before the object, so the node's name finds the camera)
 			}
 
 			// The object component will use an identity transform but will be parented to the armature:
@@ -328,6 +326,11 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 			ObjectComponent& object = *scene.objects.GetComponent(objectEntity);
 			object.meshID = meshEntity;
 			scene.Component_Attach(objectEntity, entity, true);
+
+			if (skinnedNodeEntity == INVALID_ENTITY && has_light)
+			{
+				create_skinned_node_entity(); // (after the object, so the node's name finds the object, the light is on a child)
+			}
 		}
 		else
 		{
@@ -414,7 +417,7 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 		// The light rotation in the node's rotation comes after the node's scale, which must not mirror the light's direction
 		//	against its rotation (the y and z scales of the same sign, also in scale keys):
 		const XMFLOAT3& scale = scene.transforms.GetComponent(entity)->scale_local;
-		const bool unmirrored = (scale.y < 0) == (scale.z < 0) && state.scaleAnimatedNodes.count(nodeIndex) == 0;
+		const bool unmirrored = (scale.y < 0) == (scale.z < 0) && state.mirroringScaleNodes.count(nodeIndex) == 0;
 		if (node.mesh < 0 && node.camera < 0 && node.children.empty() && state.jointNodes.count(nodeIndex) == 0 && unmirrored)
 		{
 			// A node with only the light is the light (scripts find it by the node's name). It gets the light rotation in its own
@@ -446,7 +449,7 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 	{
 		for (int child : node.children)
 		{
-			LoadNode(child, entity, state);
+			LoadNode(child, skinnedNodeEntity != INVALID_ENTITY ? skinnedNodeEntity : entity, state);
 		}
 	}
 }
@@ -1653,13 +1656,41 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 	{
 		state.jointNodes.insert(skin.joints.begin(), skin.joints.end());
 	}
+	// The nodes with scale keys that mirror the light rotation in the node's own rotation (see LoadNode()), the values of
+	//	the keys are checked (the tangents of cubic spline keys can have any signs):
 	for (const tinygltf::Animation& anim : state.gltfModel.animations)
 	{
 		for (const tinygltf::AnimationChannel& channel : anim.channels)
 		{
-			if (!channel.target_path.compare("scale"))
+			if (channel.target_path.compare("scale") || channel.sampler < 0 || channel.sampler >= (int)anim.samplers.size())
+				continue;
+			const tinygltf::AnimationSampler& sampler = anim.samplers[channel.sampler];
+			bool mirroring = true; // (unless the keys can be read)
+			if (sampler.output >= 0 && sampler.output < (int)state.gltfModel.accessors.size())
 			{
-				state.scaleAnimatedNodes.insert(channel.target_node);
+				const tinygltf::Accessor& accessor = state.gltfModel.accessors[sampler.output];
+				if (accessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && accessor.type == TINYGLTF_TYPE_VEC3 &&
+					accessor.bufferView >= 0 && accessor.bufferView < (int)state.gltfModel.bufferViews.size())
+				{
+					const tinygltf::BufferView& view = state.gltfModel.bufferViews[accessor.bufferView];
+					const int stride = accessor.ByteStride(view);
+					if (stride > 0 && view.buffer >= 0 && view.buffer < (int)state.gltfModel.buffers.size() &&
+						view.byteOffset + accessor.byteOffset + (accessor.count == 0 ? 0 : (accessor.count - 1) * stride + sizeof(XMFLOAT3)) <= state.gltfModel.buffers[view.buffer].data.size())
+					{
+						const uint8_t* data = state.gltfModel.buffers[view.buffer].data.data() + view.byteOffset + accessor.byteOffset;
+						const bool cubic = !sampler.interpolation.compare("CUBICSPLINE");
+						mirroring = false;
+						for (size_t i = cubic ? 1 : 0; i < accessor.count; i += cubic ? 3 : 1)
+						{
+							const XMFLOAT3& key = *(const XMFLOAT3*)(data + i * stride);
+							mirroring |= (key.y < 0) != (key.z < 0);
+						}
+					}
+				}
+			}
+			if (mirroring)
+			{
+				state.mirroringScaleNodes.insert(channel.target_node);
 			}
 		}
 	}
@@ -5156,8 +5187,9 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 	//	  (then the import makes the same child again) and nothing else needs the light's node.
 	//	- A light with nothing else on its node is written on its node, with the light rotation undone in the node's rotation
 	//	  (and in its rotation keys).
-	//	- A light with more on its node, which that rotation would turn (children, a mesh, a camera, a joint of a skin), is
-	//	  written on a child node that has only the light rotation undone, and its node is written as it is.
+	//	- A light with more on its node, which that rotation would turn (children, a mesh, a camera, a joint of a skin), or with
+	//	  a scale that would mirror it (the y and z scales of different signs, also in scale keys), is written on a child node
+	//	  that has only the light rotation undone, and its node is written as it is.
 	const XMVECTOR light_rotation = XMQuaternionRotationRollPitchYaw(GLTF_LIGHT_ROTATION.x, GLTF_LIGHT_ROTATION.y, GLTF_LIGHT_ROTATION.z);
 	wi::unordered_map<Entity, Entity> node_lights; // parent -> light child written on the parent's node
 	wi::unordered_set<Entity> node_light_children;
@@ -5180,13 +5212,31 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			bones.insert(wiscene.armatures[i].boneCollection.begin(), wiscene.armatures[i].boneCollection.end());
 		}
 		wi::unordered_set<Entity> animated; // targets of transform animation
+		wi::unordered_set<Entity> mirroring_scale_keys; // targets of scale keys in which the y and z scales have different signs
 		for (size_t i = 0; i < wiscene.animations.GetCount(); ++i)
 		{
-			for (const AnimationComponent::AnimationChannel& channel : wiscene.animations[i].channels)
+			const AnimationComponent& animation = wiscene.animations[i];
+			for (const AnimationComponent::AnimationChannel& channel : animation.channels)
 			{
 				if (channel.path == Path::TRANSLATION || channel.path == Path::ROTATION || channel.path == Path::SCALE)
 				{
 					animated.insert(channel.target);
+				}
+				if (channel.path != Path::SCALE || channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
+					continue;
+				// (the values of the keys, the tangents of cubic spline keys can have any signs)
+				const AnimationComponent::AnimationSampler& sampler = animation.samplers[channel.samplerIndex];
+				const Scene& data_scene = sampler.scene == nullptr ? wiscene : *(const Scene*)sampler.scene;
+				const AnimationDataComponent* data = data_scene.animation_datas.GetComponent(sampler.data);
+				if (data == nullptr)
+					continue;
+				const bool cubic = sampler.mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE;
+				for (size_t offset = cubic ? 3 : 0; offset + 3 <= data->keyframe_data.size(); offset += cubic ? 9 : 3)
+				{
+					if ((data->keyframe_data[offset + 1] < 0) != (data->keyframe_data[offset + 2] < 0))
+					{
+						mirroring_scale_keys.insert(channel.target);
+					}
 				}
 			}
 		}
@@ -5198,13 +5248,16 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			if (transform == nullptr || has_children(lightEntity) || bones.count(lightEntity) > 0 || wiscene.objects.Contains(lightEntity) ||
 				wiscene.cameras.Contains(lightEntity) || wiscene.armatures.Contains(lightEntity))
 				continue; // no node, or more on its node: the light is written on a child of the node
+			if ((transform->scale_local.y < 0) != (transform->scale_local.z < 0) || mirroring_scale_keys.count(lightEntity) > 0)
+				continue; // the light rotation undone in the node's rotation would come after the scale, which mirrors it: on a child too
 			const HierarchyComponent* hierarchy = wiscene.hierarchy.GetComponent(lightEntity);
 			const Entity parent = hierarchy == nullptr ? INVALID_ENTITY : hierarchy->parentID;
 			const XMVECTOR rotation = XMLoadFloat4(&transform->rotation_local);
 			// The parent's node gets the light only if it has more than the light (other children, a mesh, a camera, a joint of a
 			//	skin), for which the import puts the light on a child again, and not a light already:
-			const bool parent_has_more = child_counts[parent] > 1 || wiscene.objects.Contains(parent) || wiscene.cameras.Contains(parent) ||
-				bones.count(parent) > 0 || wiscene.armatures.Contains(parent);
+			const ObjectComponent* parent_object = wiscene.objects.GetComponent(parent);
+			const bool parent_has_more = child_counts[parent] > 1 || (parent_object != nullptr && wiscene.meshes.Contains(parent_object->meshID)) ||
+				wiscene.cameras.Contains(parent) || bones.count(parent) > 0;
 			if (animated.count(lightEntity) == 0 && wiscene.transforms.Contains(parent) && parent_has_more && !wiscene.lights.Contains(parent) && node_lights.count(parent) == 0 &&
 				XMVector3NearEqual(XMLoadFloat3(&transform->translation_local), XMVectorZero(), epsilon) &&
 				XMVector3NearEqual(XMLoadFloat3(&transform->scale_local), XMVectorSplatOne(), epsilon) &&

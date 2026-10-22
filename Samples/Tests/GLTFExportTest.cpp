@@ -747,6 +747,15 @@ namespace
 		const Entity torch = CreateNode(scene, "Torch", XMFLOAT3(-2, 0.5f, 1), XMFLOAT3(-0.6f, 0.2f, 0.4f));
 		scene.lights.Create(torch).SetType(LightComponent::DIRECTIONAL);
 		scene.cameras.Create(torch);
+		// Spot lights with a scale that mirrors the light rotation, with scale keys that don't, and with scale keys that do:
+		const Entity mirror = CreateNode(scene, "Mirror", XMFLOAT3(3, 1, -1), XMFLOAT3(-0.2f, 0.5f, 0.3f));
+		scene.transforms.GetComponent(mirror)->scale_local = XMFLOAT3(1, -1, 1);
+		scene.transforms.GetComponent(mirror)->SetDirty();
+		scene.lights.Create(mirror).SetType(LightComponent::SPOT);
+		const Entity scaled_lamp = CreateNode(scene, "ScaledLamp", XMFLOAT3(-3, 1, 0), XMFLOAT3(0.4f, 0.1f, -0.2f));
+		scene.lights.Create(scaled_lamp).SetType(LightComponent::SPOT);
+		const Entity flipper = CreateNode(scene, "Flipper", XMFLOAT3(0, -2, 2), XMFLOAT3(0.3f, -0.4f, 0.1f));
+		scene.lights.Create(flipper).SetType(LightComponent::SPOT);
 
 		const XMVECTOR keys[2] = { XMQuaternionRotationRollPitchYaw(0.2f, 0.4f, 0.1f), XMQuaternionRotationRollPitchYaw(-0.3f, 0.1f, 0.5f) };
 		wi::vector<float> key_data(8);
@@ -762,10 +771,19 @@ namespace
 			channel.samplerIndex = 0;
 			channel.path = Path::ROTATION;
 			animation.end = 1;
+			const std::pair<Entity, wi::vector<float>> scale_keys[] = { { scaled_lamp, { 1, 1, 1, 2, 2, 2 } }, { flipper, { 1, 1, 1, 1, -1, 1 } } };
+			for (const auto& [target, keys] : scale_keys)
+			{
+				animation.samplers.emplace_back().data = CreateData(scene, { 0, 1 }, keys);
+				AnimationComponent::AnimationChannel& scale_channel = animation.channels.emplace_back();
+				scale_channel.target = target;
+				scale_channel.samplerIndex = int(animation.samplers.size() - 1);
+				scale_channel.path = Path::SCALE;
+			}
 		}
 
-		const char* nodes[] = { "Lantern", "Handle", "Torch" };
-		const char* lights[] = { "Lantern", "Torch" };
+		const char* nodes[] = { "Lantern", "Handle", "Torch", "Mirror", "ScaledLamp", "Flipper" };
+		const char* lights[] = { "Lantern", "Torch", "Mirror", "ScaledLamp", "Flipper" };
 		struct State
 		{
 			wi::vector<XMFLOAT4X4> worlds;
@@ -873,7 +891,10 @@ namespace
 		const ObjectComponent* object = imported.objects.GetComponent(imported.Entity_FindByName("Lantern"));
 		Check(object != nullptr && imported.meshes.Contains(object->meshID), "the mesh of a light did not import back on its node");
 		Check(imported.cameras.Contains(imported.Entity_FindByName("Torch")), "the camera of a light did not import back on its node");
-		Check(imported.lights.GetCount() == std::size(lights), "expected the 2 lights with nodes to import back, got " + std::to_string(imported.lights.GetCount()));
+		Check(imported.lights.GetCount() == std::size(lights), "expected the 5 lights with nodes to import back, got " + std::to_string(imported.lights.GetCount()));
+		Check(imported.lights.Contains(imported.Entity_FindByName("ScaledLamp")), "a light with scale keys that don't mirror it did not import back as its node");
+		Check(!imported.lights.Contains(imported.Entity_FindByName("Mirror")) && !imported.lights.Contains(imported.Entity_FindByName("Flipper")),
+			"a light with a scale (or scale keys) that mirrors it was not written on a child node");
 		check_state(state_of(imported), expected, "lights with nodes, export and import");
 
 		// An other export writes the same nodes (and the root of the import), it doesn't add nodes for the lights again:
