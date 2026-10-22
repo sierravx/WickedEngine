@@ -826,6 +826,7 @@ namespace
 		}
 
 		const TransformComponent a_original = *scene.transforms.GetComponent(a);
+		const TransformComponent light_original = *scene.transforms.GetComponent(light);
 		const size_t sampler_count = scene.animations.GetComponent(animationEntity)->samplers.size();
 		wi::vector<int> channel_samplers;
 		for (const AnimationComponent::AnimationChannel& channel : scene.animations.GetComponent(animationEntity)->channels)
@@ -834,11 +835,18 @@ namespace
 		}
 		const size_t data_count = scene.animation_datas.GetCount();
 
-		ExportModel_GLTF(output_file, scene);
-
-		// The scene is restored after the export
-		const TransformComponent& a_restored = *scene.transforms.GetComponent(a);
-		Check(std::memcmp(&a_restored.translation_local, &a_original.translation_local, sizeof(XMFLOAT3)) == 0 && std::memcmp(&a_restored.rotation_local, &a_original.rotation_local, sizeof(XMFLOAT4)) == 0, "the transforms were not restored after the export");
+		// The scene is restored after each export, so exporting again doesn't change it (the light node's forward flip
+		//	must not be rounded into the light's rotation). The file of the last export is checked below.
+		auto same_transform = [](const TransformComponent& x, const TransformComponent& y) {
+			return std::memcmp(&x.scale_local, &y.scale_local, sizeof(XMFLOAT3)) == 0 && std::memcmp(&x.rotation_local, &y.rotation_local, sizeof(XMFLOAT4)) == 0 && std::memcmp(&x.translation_local, &y.translation_local, sizeof(XMFLOAT3)) == 0;
+		};
+		for (int i = 1; i <= 3; ++i)
+		{
+			ExportModel_GLTF(output_file, scene);
+			const std::string after = " after export " + std::to_string(i);
+			Check(same_transform(*scene.transforms.GetComponent(a), a_original), "the transforms were not restored" + after);
+			Check(same_transform(*scene.transforms.GetComponent(light), light_original), "the transform of the light was not restored" + after);
+		}
 		Check(scene.animation_datas.GetComponent(translation_data)->keyframe_data == translation_keys && scene.animation_datas.GetComponent(shared_data)->keyframe_data == shared_keys, "the animation keys were not restored after the export");
 		const AnimationComponent& restored = *scene.animations.GetComponent(animationEntity);
 		Check(std::memcmp(&restored.retargets[0].dstRelativeMatrix, &retarget_dst, sizeof(XMFLOAT4X4)) == 0 && std::memcmp(&restored.retargets[1].srcRelativeParentMatrix, &retarget_src, sizeof(XMFLOAT4X4)) == 0, "the retarget matrices were not restored after the export");
@@ -1033,6 +1041,12 @@ namespace
 				const std::vector<double>& rotation = model.nodes[node].rotation;
 				const wi::vector<float> node_rotation = { float(rotation[0]), float(rotation[1]), float(rotation[2]), float(rotation[3]) };
 				Check(values.size() == 8 && Near(wi::vector<float>(values.begin(), values.begin() + 4), node_rotation), "the rotation keys of a light did not get the light's forward flip");
+				// The node's rotation is the light's rotation in the glTF space, rotated like TransformComponent::RotateRollPitchYaw() rotates it
+				TransformComponent flipped = light_original;
+				XMStoreFloat4(&flipped.rotation_local, MirrorRotation(XMLoadFloat4(&light_original.rotation_local)));
+				flipped.RotateRollPitchYaw(XMFLOAT3(-XM_PIDIV2, 0, 0));
+				const XMFLOAT4& expected = flipped.rotation_local;
+				Check(Near(node_rotation, { expected.x, expected.y, expected.z, expected.w }, 1e-6f), "the light node was not exported with the light's rotation after the forward flip");
 			}
 			auto output_of = [&](const std::string& name) {
 				for (const tinygltf::AnimationChannel& channel : exported.channels)

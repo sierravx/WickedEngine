@@ -5033,20 +5033,27 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			}
 		}
 	}
+	// The light rotation undone in the written values (the lights of the scene are left as they are), for the nodes of the lights
+	//	written with it undone and their rotation keys (see the animations below), and for the extra child nodes of lights:
+	const XMVECTOR light_forward_flip = XMQuaternionRotationRollPitchYaw(-XM_PIDIV2, 0, 0); // (the inverse of GLTF_LIGHT_ROTATION, as RotateRollPitchYaw() makes it)
 
 	// Compose Node
 	for(size_t t_id = 0; t_id < wiscene.transforms.GetCount(); ++t_id)
 	{
-		auto& transformComponent = wiscene.transforms[t_id];
+		const TransformComponent& transformComponent = wiscene.transforms[t_id];
 		auto transformEntity = wiscene.transforms.GetEntity(t_id);
 		auto nameComponent = wiscene.names.GetComponent(transformEntity);
 
 		if (node_light_children.count(transformEntity) > 0)
 			continue; // written as the light of the parent's node
 
-		auto light_forward_flip = flipped_lights.count(transformEntity) > 0;
-		if(light_forward_flip)
-			transformComponent.RotateRollPitchYaw(XMFLOAT3(-XM_PIDIV2,0,0));
+		const bool flipped_light = flipped_lights.count(transformEntity) > 0;
+		XMFLOAT4 rotation = transformComponent.rotation_local;
+		if(flipped_light)
+		{
+			// (normalized, as TransformComponent::RotateRollPitchYaw() would give it)
+			XMStoreFloat4(&rotation, XMQuaternionNormalize(XMQuaternionMultiply(light_forward_flip, XMLoadFloat4(&rotation))));
+		}
 
 		auto objectComponent = wiscene.objects.GetComponent(transformEntity);
 
@@ -5060,18 +5067,15 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		node_builder.scale.push_back(transformComponent.scale_local.y);
 		node_builder.scale.push_back(transformComponent.scale_local.z);
 
-		node_builder.rotation.push_back(transformComponent.rotation_local.x);
-		node_builder.rotation.push_back(transformComponent.rotation_local.y);
-		node_builder.rotation.push_back(transformComponent.rotation_local.z);
-		node_builder.rotation.push_back(transformComponent.rotation_local.w);
+		node_builder.rotation.push_back(rotation.x);
+		node_builder.rotation.push_back(rotation.y);
+		node_builder.rotation.push_back(rotation.z);
+		node_builder.rotation.push_back(rotation.w);
 
 		node_builder.translation.push_back(transformComponent.translation_local.x);
 		node_builder.translation.push_back(transformComponent.translation_local.y);
 		node_builder.translation.push_back(transformComponent.translation_local.z);
 
-		if(light_forward_flip)
-			transformComponent.RotateRollPitchYaw(XMFLOAT3(XM_PIDIV2,0,0));
-		
 		if(objectComponent != nullptr)
 		{
 			if(objectComponent->meshID != wi::ecs::INVALID_ENTITY && wiscene.meshes.Contains(objectComponent->meshID))
@@ -5085,7 +5089,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		}
 
 		// tinygltf writes the node's KHR_lights_punctual extension from node.light (and removes it from the extensions without that)
-		if(light_forward_flip)
+		if(flipped_light)
 		{
 			node_builder.light = int(wiscene.lights.GetIndex(transformEntity));
 		}
@@ -5102,14 +5106,14 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		state.nodeMap[transformEntity] = node_index;
 		state.gltfModel.nodes.push_back(node_builder);
 
-		if(wiscene.lights.Contains(transformEntity) && !light_forward_flip)
+		if(wiscene.lights.Contains(transformEntity) && !flipped_light)
 		{
 			// The light rotation would turn the rest of the node, the light is written on a child node with only that rotation undone:
 			tinygltf::Node light_builder;
 			light_builder.name = node_builder.name;
-			XMFLOAT4 rotation;
-			XMStoreFloat4(&rotation, XMQuaternionInverse(light_rotation));
-			light_builder.rotation = { rotation.x, rotation.y, rotation.z, rotation.w };
+			XMFLOAT4 light_node_rotation;
+			XMStoreFloat4(&light_node_rotation, light_forward_flip);
+			light_builder.rotation = { light_node_rotation.x, light_node_rotation.y, light_node_rotation.z, light_node_rotation.w };
 			light_builder.light = int(wiscene.lights.GetIndex(transformEntity));
 			light_child_nodes.emplace_back(node_index, (int)state.gltfModel.nodes.size());
 			state.gltfModel.nodes.push_back(light_builder);
@@ -5316,9 +5320,6 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				previous_result = sign * result;
 			}
 		};
-
-		// Light nodes written with a forward flip in their rotation (see the nodes above) get it in their rotation keys too:
-		const XMVECTOR light_forward_flip = XMQuaternionRotationRollPitchYaw(-XM_PIDIV2, 0, 0);
 
 		// The keys of a channel are written as they are, or with these changes. The same data with the same changes shares accessors:
 		enum KeyChanges : uint32_t
