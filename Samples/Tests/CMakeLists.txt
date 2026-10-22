@@ -81,6 +81,17 @@ if (UNIX AND NOT APPLE)
 	add_test(NAME GLTFExportTest COMMAND GLTFExportTest)
 	set_tests_properties(GLTFExportTest PROPERTIES SKIP_RETURN_CODE 77)
 	set_target_properties(GLTFExportTest PROPERTIES FOLDER "Tests")
+
+	# The cameras of the editor's glTF importer, it needs a Vulkan device too and is skipped without one
+	add_executable(GLTFCameraImportTest
+		GLTFCameraImportTest.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/../../Editor/ModelImporter_GLTF.cpp
+	)
+	target_include_directories(GLTFCameraImportTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../Editor)
+	target_link_libraries(GLTFCameraImportTest PRIVATE WickedEngine)
+	add_test(NAME GLTFCameraImportTest COMMAND GLTFCameraImportTest)
+	set_tests_properties(GLTFCameraImportTest PROPERTIES SKIP_RETURN_CODE 77)
+	set_target_properties(GLTFCameraImportTest PROPERTIES FOLDER "Tests")
 endif()
 
 

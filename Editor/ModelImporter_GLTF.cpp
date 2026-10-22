@@ -149,6 +149,7 @@ struct LoaderState
 	Scene* scene;
 	wi::unordered_map<int, Entity> entityMap;  // node -> entity
 	std::unordered_multimap<int, Entity> punctualLightMap;  // KHR_lights_punctual -> entities
+	std::unordered_multimap<int, Entity> cameraMap;  // camera -> entities
 	Entity rootEntity = INVALID_ENTITY;
 
 	//Export states
@@ -252,7 +253,8 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 			node.name = "cam" + std::to_string(camID++);
 		}
 
-		entity = scene.Entity_CreateCamera(node.name, 16, 9);
+		entity = scene.Entity_CreateCamera(node.name, 16, 9); // camera component will be filled later
+		state.cameraMap.insert({ node.camera, entity });
 	}
 
 	auto ext_lights_punctual = node.extensions.find("KHR_lights_punctual");
@@ -1824,24 +1826,46 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 		}
 	}
 
+	// Fill cameras (a camera can be used by several nodes, or by none):
 	int cameraIndex = 0;
 	for (auto& x : state.gltfModel.cameras)
 	{
-		if (!x.type.compare("orthographic"))
-			continue;
-		Entity entity = scene.cameras.GetEntity(cameraIndex);
-		CameraComponent& camera = scene.cameras[cameraIndex++];
-
-		if (x.perspective.aspectRatio > 0)
+		for (auto [it, end] = state.cameraMap.equal_range(cameraIndex); it != end; it++)
 		{
-			camera.width = float(x.perspective.aspectRatio);
-			camera.height = 1.f;
-		}
-		camera.fov = (float)x.perspective.yfov;
-		camera.zFarP = (float)x.perspective.zfar;
-		camera.zNearP = (float)x.perspective.znear;
+			Entity entity = it->second;
+			CameraComponent& camera = *scene.cameras.GetComponent(entity); // (the camera components are not in the order of the glTF cameras)
 
-		ImportMetadata(state, entity, x.extras);
+			if (!x.type.compare("orthographic"))
+			{
+				// In gltf, xmag and ymag are half of the width and height of the view, in engine, ortho_vertical_size is the whole height:
+				if (x.orthographic.xmag != 0 && x.orthographic.ymag != 0)
+				{
+					camera.width = float(x.orthographic.xmag / x.orthographic.ymag);
+					camera.height = 1.f;
+					camera.ortho_vertical_size = float(x.orthographic.ymag * 2);
+				}
+				camera.zFarP = (float)x.orthographic.zfar;
+				camera.zNearP = (float)x.orthographic.znear;
+				camera.SetOrtho(true);
+			}
+			else
+			{
+				if (x.perspective.aspectRatio > 0)
+				{
+					camera.width = float(x.perspective.aspectRatio);
+					camera.height = 1.f;
+				}
+				camera.fov = (float)x.perspective.yfov;
+				if (x.perspective.zfar > 0) // without zfar, the gltf projection is infinite, the engine keeps its own far plane
+				{
+					camera.zFarP = (float)x.perspective.zfar;
+				}
+				camera.zNearP = (float)x.perspective.znear;
+			}
+
+			ImportMetadata(state, entity, x.extras);
+		}
+		cameraIndex++;
 	}
 
 	// https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Vendor/EXT_lights_image_based/README.md
@@ -4951,12 +4975,25 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		if(nameComponent != nullptr)
 			camera_builder.name = nameComponent->name;
 
-		camera_builder.type = "perspective";
-		camera_builder.perspective.aspectRatio = camera.width/camera.height;
-		camera_builder.perspective.yfov = camera.fov;
-		camera_builder.perspective.zfar = camera.zFarP;
-		camera_builder.perspective.znear = camera.zNearP;
+		if(camera.IsOrtho())
+		{
+			// In gltf, xmag and ymag are half of the width and height of the view, in engine, ortho_vertical_size is the whole height
+			camera_builder.type = "orthographic";
+			camera_builder.orthographic.ymag = camera.ortho_vertical_size * 0.5;
+			camera_builder.orthographic.xmag = camera_builder.orthographic.ymag * camera.width / camera.height;
+			camera_builder.orthographic.zfar = camera.zFarP;
+			camera_builder.orthographic.znear = camera.zNearP;
+		}
+		else
+		{
+			camera_builder.type = "perspective";
+			camera_builder.perspective.aspectRatio = camera.width/camera.height;
+			camera_builder.perspective.yfov = camera.fov;
+			camera_builder.perspective.zfar = camera.zFarP;
+			camera_builder.perspective.znear = camera.zNearP;
+		}
 
+		// The nodes refer to this camera by the index of the camera component (see node_builder.camera)
 		state.gltfModel.cameras.push_back(camera_builder);
 	}
 
