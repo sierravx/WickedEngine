@@ -316,12 +316,16 @@ namespace
 	// Import of the names of light entities, and the lights of joints: a node with only a light is the light and keeps the
 	//	node's name (the light's name is used for a node without one, "light" with a number for a light without one too), the
 	//	light of a node with more is on a child named after the light (or after the node, for a light without a name). A joint
-	//	with a light keeps its rotation, the light is on a child. The node names stay after an export and an import.
+	//	with a light keeps its rotation, the light is on a child. A light node whose scale would mirror the light rotation has
+	//	its light on a child too, a node with a light that doesn't exist has none. The nodes stay after an export and an import,
+	//	the light of a node with only a child that is a light node is not written on that node.
 	void CheckLightNames()
 	{
 		const std::string names_file = "GLTFImportTest_light_names.gltf";
 		const std::string export_name = "GLTFImportTest_light_names_export";
 		const XMVECTOR joint_rotation = XMQuaternionRotationRollPitchYaw(0.3f, 0.2f, -0.4f);
+		const XMVECTOR mirrored_rotation = XMQuaternionRotationRollPitchYaw(-0.2f, 0.5f, 0.3f);
+		const XMFLOAT3 mirrored_scale(1, 2, -1);
 		const std::string json = R"({
 	"asset": { "version": "2.0" },
 	"extensionsUsed": [ "KHR_lights_punctual" ],
@@ -332,10 +336,11 @@ namespace
 		{ "type": "spot", "name": "SharedDefinition", "spot": { "outerConeAngle": 0.6 } },
 		{ "type": "point", "name": "HolderBulb" },
 		{ "type": "point" },
-		{ "type": "point", "name": "JointBulb" }
+		{ "type": "point", "name": "JointBulb" },
+		{ "type": "spot", "name": "MirroredBulb", "spot": { "outerConeAngle": 0.5 } }
 	] } },
 	"scene": 0,
-	"scenes": [ { "nodes": [ 0, 1, 2, 3, 4, 5, 7, 9 ] } ],
+	"scenes": [ { "nodes": [ 0, 1, 2, 3, 4, 5, 7, 9, 10, 12, 13 ] } ],
 	"nodes": [
 		{ "name": "PlainNode", "extensions": { "KHR_lights_punctual": { "light": 0 } } },
 		{ "extensions": { "KHR_lights_punctual": { "light": 1 } } },
@@ -346,7 +351,11 @@ namespace
 		{ "name": "HolderChild" },
 		{ "name": "UnnamedHolder", "children": [ 8 ], "extensions": { "KHR_lights_punctual": { "light": 5 } } },
 		{ "name": "UnnamedHolderChild" },
-		{ "name": "Joint", "rotation": )" + JsonArray(joint_rotation) + R"(, "extensions": { "KHR_lights_punctual": { "light": 6 } } }
+		{ "name": "Joint", "rotation": )" + JsonArray(joint_rotation) + R"(, "extensions": { "KHR_lights_punctual": { "light": 6 } } },
+		{ "name": "Pivot", "children": [ 11 ] },
+		{ "name": "Lamp", "extensions": { "KHR_lights_punctual": { "light": 0 } } },
+		{ "name": "Mirrored", "rotation": )" + JsonArray(mirrored_rotation) + R"(, "scale": )" + JsonArray(mirrored_scale) + R"(, "extensions": { "KHR_lights_punctual": { "light": 7 } } },
+		{ "name": "MissingLight", "extensions": { "KHR_lights_punctual": { "light": 99 } } }
 	],
 	"skins": [ { "name": "JointSkin", "joints": [ 9 ] } ]
 })";
@@ -385,7 +394,19 @@ namespace
 			const HierarchyComponent* hierarchy = of.hierarchy.GetComponent(entity);
 			return hierarchy == nullptr ? INVALID_ENTITY : hierarchy->parentID;
 		};
-		Check(scene.lights.GetCount() == 8, "light names: expected 8 lights, got " + std::to_string(scene.lights.GetCount()));
+		Check(scene.lights.GetCount() == 10, "light names: expected 10 lights, got " + std::to_string(scene.lights.GetCount()));
+		Check(scene.lights.Contains(scene.Entity_FindByName("Lamp")) && !scene.lights.Contains(scene.Entity_FindByName("Pivot")), "light names: the light node under a node is not the light");
+		Check(!scene.lights.Contains(scene.Entity_FindByName("MissingLight")) && LightOf(scene, scene.Entity_FindByName("MissingLight")) == INVALID_ENTITY,
+			"light names: a node with a light that doesn't exist got a light");
+		// The light of the mirrored node points where the glTF light points (in the engine space):
+		auto check_mirrored = [&](Scene& of, const std::string& what) {
+			const Entity mirrored = of.Entity_FindByName("Mirrored");
+			const LightComponent* light = of.lights.GetComponent(LightOf(of, mirrored));
+			const XMVECTOR expected = EngineLightDirection(LocalMatrix(XMFLOAT3(0, 0, 0), mirrored_rotation, mirrored_scale));
+			Check(light != nullptr && !of.lights.Contains(mirrored) && XMVectorGetX(XMVector3Length(XMLoadFloat3(&light->direction) - expected)) < 1e-4f,
+				what + ": the light of a node with a mirroring scale is not on a child pointing where the glTF light points");
+		};
+		check_mirrored(scene, "light names");
 		for (const char* node : { "PlainNode", "ShareA", "ShareB" })
 		{
 			Check(scene.lights.Contains(scene.Entity_FindByName(node)), std::string("light names: the light of the node ") + node + " is not the node with its name");
@@ -413,10 +434,32 @@ namespace
 
 		RemoveOutputFiles(export_name);
 		ExportModel_GLTF(export_name + ".gltf", scene);
+		{
+			// A light node under a node with nothing else is written as a node with its light, not as the light of its parent
+			//	(the import of which would make the parent the light). (The light nodes at the top, under the root of the import
+			//	with its other nodes, are written as lights of the root, which imports them back on children named after them.)
+			tinygltf::TinyGLTF loader;
+			tinygltf::Model model;
+			std::string err, warn;
+			const bool loaded = loader.LoadASCIIFromFile(&model, &err, &warn, export_name + ".gltf");
+			Check(loaded, "light names: the exported file could not be loaded: " + err);
+			auto light_of_node = [&](const std::string& name) {
+				for (const tinygltf::Node& node : model.nodes)
+				{
+					if (node.name == name)
+						return node.light;
+				}
+				return -2;
+			};
+			Check(!loaded || (light_of_node("Lamp") >= 0 && light_of_node("Pivot") == -1), "light names: a light node under a node with nothing else was not written as a node with its light");
+		}
 		Scene reimported;
 		ImportModel_GLTF(export_name + ".gltf", reimported);
 		RemoveOutputFiles(export_name);
-		for (const char* node : { "PlainNode", "ShareA", "ShareB", "NodelessDefinition", "Holder", "HolderChild", "UnnamedHolder", "Joint" })
+		Check(reimported.lights.Contains(reimported.Entity_FindByName("Lamp")) && !reimported.lights.Contains(reimported.Entity_FindByName("Pivot")),
+			"light names, export and import: the light node under a node is not the light");
+		check_mirrored(reimported, "light names, export and import");
+		for (const char* node : { "PlainNode", "ShareA", "ShareB", "NodelessDefinition", "Holder", "HolderChild", "UnnamedHolder", "Joint", "Pivot", "Lamp", "Mirrored" })
 		{
 			Check(reimported.Entity_FindByName(node) != INVALID_ENTITY, std::string("light names, export and import: the node ") + node + " lost its name");
 		}
@@ -425,7 +468,7 @@ namespace
 			Check(reimported.lights.Contains(reimported.Entity_FindByName(node)), std::string("light names, export and import: the light of the node ") + node + " is not the node");
 		}
 		Check(light_named(reimported, "HolderBulb") != INVALID_ENTITY, "light names, export and import: the light of a node with a child lost its name");
-		Check(reimported.lights.GetCount() == 8, "light names, export and import: expected 8 lights, got " + std::to_string(reimported.lights.GetCount()));
+		Check(reimported.lights.GetCount() == 10, "light names, export and import: expected 10 lights, got " + std::to_string(reimported.lights.GetCount()));
 	}
 
 	// Import and export of glTF nodes with a light (KHR_lights_punctual): (a) a light node with a child node, (b) a node with

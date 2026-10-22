@@ -153,6 +153,8 @@ struct LoaderState
 	std::unordered_multimap<int, Entity> cameraMap;  // camera -> entities
 	wi::unordered_set<int> jointNodes; // the nodes that are joints of a skin
 	wi::unordered_set<Entity> rotatedLights; // the light nodes that got the light rotation in their own rotation (and rotation keys)
+	wi::unordered_map<int, Entity> nodeTransformMap; // node -> entity with the node's transform, when it is not the entity of the node (skinned mesh nodes)
+	wi::unordered_set<int> scaleAnimatedNodes; // the nodes that have scale animation
 	int lightID = 0; // numbers the names of the lights that have no name
 	Entity rootEntity = INVALID_ENTITY;
 
@@ -280,9 +282,14 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 	Entity entity = INVALID_ENTITY;
 	Entity objectEntity = INVALID_ENTITY;
 	auto ext_lights_punctual = node.extensions.find("KHR_lights_punctual");
-	const bool has_light = ext_lights_punctual != node.extensions.end();
-	// The camera and the light of a skinned mesh node keep the node's transform (only the skinned mesh ignores it, see below),
-	//	they are put on a child of the armature with that transform:
+	int lightIndex = -1;
+	if (ext_lights_punctual != node.extensions.end())
+	{
+		lightIndex = ext_lights_punctual->second.Get("light").Get<int>();
+	}
+	const bool has_light = lightIndex >= 0 && lightIndex < (int)state.gltfModel.lights.size(); // (a node can refer to a light that doesn't exist)
+	// The camera and the light of a skinned mesh node keep the node's transform and animation (only the skinned mesh ignores
+	//	them, see below), they are put on an entity with that transform, next to the armature:
 	Entity skinnedNodeEntity = INVALID_ENTITY;
 
 	if(node.mesh >= 0)
@@ -307,18 +314,20 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 			}
 			mesh->armatureID = entity;
 
+			if (node.camera >= 0 || has_light)
+			{
+				// (created before the object, so the node's name finds the camera or light)
+				skinnedNodeEntity = CreateEntity();
+				scene.transforms.Create(skinnedNodeEntity);
+				scene.names.Create(skinnedNodeEntity) = node.name;
+				state.nodeTransformMap[nodeIndex] = skinnedNodeEntity;
+			}
+
 			// The object component will use an identity transform but will be parented to the armature:
 			objectEntity = scene.Entity_CreateObject(node.name);
 			ObjectComponent& object = *scene.objects.GetComponent(objectEntity);
 			object.meshID = meshEntity;
 			scene.Component_Attach(objectEntity, entity, true);
-
-			if (node.camera >= 0 || has_light)
-			{
-				skinnedNodeEntity = CreateEntity();
-				scene.transforms.Create(skinnedNodeEntity);
-				scene.names.Create(skinnedNodeEntity) = node.name;
-			}
 		}
 		else
 		{
@@ -366,10 +375,15 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 	{
 		if (skinnedNodeEntity != INVALID_ENTITY)
 		{
+			// Under the parent of the node (the armature, which can be shared by the mesh nodes of the skin, is attached to the
+			//	parent of the last of them):
 			TransformComponent& skinned_node_transform = *scene.transforms.GetComponent(skinnedNodeEntity);
 			ApplyNodeTransform(node, skinned_node_transform);
 			skinned_node_transform.UpdateTransform();
-			scene.Component_Attach(skinnedNodeEntity, entity, true);
+			if (parent != INVALID_ENTITY)
+			{
+				scene.Component_Attach(skinnedNodeEntity, parent, true);
+			}
 		}
 		// glTF 2.0 specification, Skins: "Only the joint transforms are applied to
 		// the skinned mesh; the transform of the skinned mesh node MUST be ignored."
@@ -396,9 +410,12 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 	if (has_light)
 	{
 		// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_lights_punctual
-		int index = ext_lights_punctual->second.Get("light").Get<int>();
 		Entity lightEntity = INVALID_ENTITY;
-		if (node.mesh < 0 && node.camera < 0 && node.children.empty() && state.jointNodes.count(nodeIndex) == 0)
+		// The light rotation in the node's rotation comes after the node's scale, which must not mirror the light's direction
+		//	against its rotation (the y and z scales of the same sign, also in scale keys):
+		const XMFLOAT3& scale = scene.transforms.GetComponent(entity)->scale_local;
+		const bool unmirrored = (scale.y < 0) == (scale.z < 0) && state.scaleAnimatedNodes.count(nodeIndex) == 0;
+		if (node.mesh < 0 && node.camera < 0 && node.children.empty() && state.jointNodes.count(nodeIndex) == 0 && unmirrored)
 		{
 			// A node with only the light is the light (scripts find it by the node's name). It gets the light rotation in its own
 			//	rotation, and in its rotation keys (see ImportModel_GLTF()), which turns nothing else:
@@ -415,14 +432,14 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 		}
 		else
 		{
-			// The light of a node with more (children, a mesh, a camera, a joint of a skin), which the light rotation would turn,
-			//	is put on a child with the fixed light rotation, so the node keeps its transform, animation, children, mesh or
-			//	camera as they are (the exporter writes such a child as the light of the node):
+			// The light of a node with more (children, a mesh, a camera, a joint of a skin), which the light rotation would turn
+			//	(or with a scale that would mirror it), is put on a child with the fixed light rotation, so the node keeps its
+			//	transform, animation, children, mesh or camera as they are (the exporter writes such a child as the light of the node):
 			lightEntity = scene.Entity_CreateLight(""); // light component will be filled later
 			scene.transforms.GetComponent(lightEntity)->RotateRollPitchYaw(GLTF_LIGHT_ROTATION);
 			scene.Component_Attach(lightEntity, skinnedNodeEntity != INVALID_ENTITY ? skinnedNodeEntity : entity, true);
 		}
-		state.punctualLightMap.insert({ index, lightEntity });
+		state.punctualLightMap.insert({ lightIndex, lightEntity });
 	}
 
 	if (!node.children.empty())
@@ -1636,6 +1653,16 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 	{
 		state.jointNodes.insert(skin.joints.begin(), skin.joints.end());
 	}
+	for (const tinygltf::Animation& anim : state.gltfModel.animations)
+	{
+		for (const tinygltf::AnimationChannel& channel : anim.channels)
+		{
+			if (!channel.target_path.compare("scale"))
+			{
+				state.scaleAnimatedNodes.insert(channel.target_node);
+			}
+		}
+	}
 	const tinygltf::Scene &gltfScene = state.gltfModel.scenes[std::max(0, state.gltfModel.defaultScene)];
 	for (size_t i = 0; i < gltfScene.nodes.size(); i++)
 	{
@@ -1794,6 +1821,11 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 			auto& channel = anim.channels[i];
 
 			animationcomponent.channels[i].target = state.entityMap[channel.target_node];
+			auto node_transform = state.nodeTransformMap.find(channel.target_node);
+			if (node_transform != state.nodeTransformMap.end() && channel.target_path.compare("weights"))
+			{
+				animationcomponent.channels[i].target = node_transform->second; // (the transform of a skinned mesh node, for its camera and light)
+			}
 			assert(channel.sampler >= 0);
 			animationcomponent.channels[i].samplerIndex = (uint32_t)channel.sampler;
 
@@ -5119,8 +5151,9 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 	tinygltf::Scene scene_builder;
 
 	// glTF lights point forward and engine lights down (see GLTF_LIGHT_ROTATION), so lights are written in one of three ways:
-	//	- A light on a child with only the light rotation, as the import makes it (see LoadNode()), is written as the light of
-	//	  its parent's node, without a node of its own, if nothing else needs that node.
+	//	- A light on a child with only the light rotation, as the import makes it for a node with more than the light (see
+	//	  LoadNode()), is written as the light of its parent's node, without a node of its own, if the parent has more too
+	//	  (then the import makes the same child again) and nothing else needs the light's node.
 	//	- A light with nothing else on its node is written on its node, with the light rotation undone in the node's rotation
 	//	  (and in its rotation keys).
 	//	- A light with more on its node, which that rotation would turn (children, a mesh, a camera, a joint of a skin), is
@@ -5132,14 +5165,15 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 	wi::vector<std::pair<int, int>> light_child_nodes; // node -> child node written with the light of the node's entity
 	{
 		using Path = AnimationComponent::AnimationChannel::Path;
-		wi::unordered_set<Entity> parents; // entities with children that are written as nodes
+		wi::unordered_map<Entity, size_t> child_counts; // entities -> their children that are written as nodes
 		for (size_t i = 0; i < wiscene.hierarchy.GetCount(); ++i)
 		{
 			if (wiscene.transforms.Contains(wiscene.hierarchy.GetEntity(i)))
 			{
-				parents.insert(wiscene.hierarchy[i].parentID);
+				child_counts[wiscene.hierarchy[i].parentID]++;
 			}
 		}
+		auto has_children = [&](Entity entity) { auto count = child_counts.find(entity); return count != child_counts.end() && count->second > 0; };
 		wi::unordered_set<Entity> bones;
 		for (size_t i = 0; i < wiscene.armatures.GetCount(); ++i)
 		{
@@ -5161,14 +5195,17 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		{
 			const Entity lightEntity = wiscene.lights.GetEntity(l_id);
 			const TransformComponent* transform = wiscene.transforms.GetComponent(lightEntity);
-			if (transform == nullptr || parents.count(lightEntity) > 0 || bones.count(lightEntity) > 0 || wiscene.objects.Contains(lightEntity) ||
+			if (transform == nullptr || has_children(lightEntity) || bones.count(lightEntity) > 0 || wiscene.objects.Contains(lightEntity) ||
 				wiscene.cameras.Contains(lightEntity) || wiscene.armatures.Contains(lightEntity))
 				continue; // no node, or more on its node: the light is written on a child of the node
 			const HierarchyComponent* hierarchy = wiscene.hierarchy.GetComponent(lightEntity);
 			const Entity parent = hierarchy == nullptr ? INVALID_ENTITY : hierarchy->parentID;
 			const XMVECTOR rotation = XMLoadFloat4(&transform->rotation_local);
-			// (the parent's node must not have a light already)
-			if (animated.count(lightEntity) == 0 && wiscene.transforms.Contains(parent) && !wiscene.lights.Contains(parent) && node_lights.count(parent) == 0 &&
+			// The parent's node gets the light only if it has more than the light (other children, a mesh, a camera, a joint of a
+			//	skin), for which the import puts the light on a child again, and not a light already:
+			const bool parent_has_more = child_counts[parent] > 1 || wiscene.objects.Contains(parent) || wiscene.cameras.Contains(parent) ||
+				bones.count(parent) > 0 || wiscene.armatures.Contains(parent);
+			if (animated.count(lightEntity) == 0 && wiscene.transforms.Contains(parent) && parent_has_more && !wiscene.lights.Contains(parent) && node_lights.count(parent) == 0 &&
 				XMVector3NearEqual(XMLoadFloat3(&transform->translation_local), XMVectorZero(), epsilon) &&
 				XMVector3NearEqual(XMLoadFloat3(&transform->scale_local), XMVectorSplatOne(), epsilon) &&
 				(XMVector4NearEqual(rotation, light_rotation, epsilon) || XMVector4NearEqual(rotation, -light_rotation, epsilon)))

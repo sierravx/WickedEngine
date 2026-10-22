@@ -68,6 +68,14 @@ int main(int argc, char** argv)
 		waited_ms += 10;
 	}
 
+#ifndef NDEBUG
+	// In debug builds the failed Vulkan call asserts (vulkan_check()) before the device ends the process, which also ends it:
+	if (WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT)
+	{
+		std::cout << "GraphicsDeviceFatalError test passed (the failed device creation asserted in this debug build)\n";
+		return 0;
+	}
+#endif
 	if (WIFSIGNALED(status))
 	{
 		std::cerr << "GraphicsDeviceFatalError test failed: device creation crashed with signal " << WTERMSIG(status) << '\n';
