@@ -2532,15 +2532,18 @@ namespace wi::scene
 							const float t2 = t * t;
 							const float t3 = t2 * t;
 
+							// The tangents are derivatives over time, they are scaled by the time between the keys (like in glTF):
+							const float key_dt = right - left;
+
 							switch (path_data_type)
 							{
 							default:
 							case AnimationComponent::AnimationChannel::PathDataType::Float:
 							{
-								assert(animationdata->keyframe_data.size() == animationdata->keyframe_times.size());
+								assert(animationdata->keyframe_data.size() == animationdata->keyframe_times.size() * 3);
 								float vLeft = animationdata->keyframe_data[keyLeft * 3 + 1];
-								float vLeftTanOut = animationdata->keyframe_data[keyLeft * 3 + 2];
-								float vRightTanIn = animationdata->keyframe_data[keyRight * 3 + 0];
+								float vLeftTanOut = key_dt * animationdata->keyframe_data[keyLeft * 3 + 2];
+								float vRightTanIn = key_dt * animationdata->keyframe_data[keyRight * 3 + 0];
 								float vRight = animationdata->keyframe_data[keyRight * 3 + 1];
 								float vAnim = (2 * t3 - 3 * t2 + 1) * vLeft + (t3 - 2 * t2 + t) * vLeftTanOut + (-2 * t3 + 3 * t2) * vRight + (t3 - t2) * vRightTanIn;
 								interpolator.f = vAnim;
@@ -2551,8 +2554,8 @@ namespace wi::scene
 								assert(animationdata->keyframe_data.size() == animationdata->keyframe_times.size() * 2 * 3);
 								const XMFLOAT2* data = (const XMFLOAT2*)animationdata->keyframe_data.data();
 								XMVECTOR vLeft = XMLoadFloat2(&data[keyLeft * 3 + 1]);
-								XMVECTOR vLeftTanOut = dt * XMLoadFloat2(&data[keyLeft * 3 + 2]);
-								XMVECTOR vRightTanIn = dt * XMLoadFloat2(&data[keyRight * 3 + 0]);
+								XMVECTOR vLeftTanOut = key_dt * XMLoadFloat2(&data[keyLeft * 3 + 2]);
+								XMVECTOR vRightTanIn = key_dt * XMLoadFloat2(&data[keyRight * 3 + 0]);
 								XMVECTOR vRight = XMLoadFloat2(&data[keyRight * 3 + 1]);
 								XMVECTOR vAnim = (2 * t3 - 3 * t2 + 1) * vLeft + (t3 - 2 * t2 + t) * vLeftTanOut + (-2 * t3 + 3 * t2) * vRight + (t3 - t2) * vRightTanIn;
 								XMStoreFloat2(&interpolator.f2, vAnim);
@@ -2563,8 +2566,8 @@ namespace wi::scene
 								assert(animationdata->keyframe_data.size() == animationdata->keyframe_times.size() * 3 * 3);
 								const XMFLOAT3* data = (const XMFLOAT3*)animationdata->keyframe_data.data();
 								XMVECTOR vLeft = XMLoadFloat3(&data[keyLeft * 3 + 1]);
-								XMVECTOR vLeftTanOut = dt * XMLoadFloat3(&data[keyLeft * 3 + 2]);
-								XMVECTOR vRightTanIn = dt * XMLoadFloat3(&data[keyRight * 3 + 0]);
+								XMVECTOR vLeftTanOut = key_dt * XMLoadFloat3(&data[keyLeft * 3 + 2]);
+								XMVECTOR vRightTanIn = key_dt * XMLoadFloat3(&data[keyRight * 3 + 0]);
 								XMVECTOR vRight = XMLoadFloat3(&data[keyRight * 3 + 1]);
 								XMVECTOR vAnim = (2 * t3 - 3 * t2 + 1) * vLeft + (t3 - 2 * t2 + t) * vLeftTanOut + (-2 * t3 + 3 * t2) * vRight + (t3 - t2) * vRightTanIn;
 								XMStoreFloat3(&interpolator.f3, vAnim);
@@ -2575,8 +2578,8 @@ namespace wi::scene
 								assert(animationdata->keyframe_data.size() == animationdata->keyframe_times.size() * 4 * 3);
 								const XMFLOAT4* data = (const XMFLOAT4*)animationdata->keyframe_data.data();
 								XMVECTOR vLeft = XMLoadFloat4(&data[keyLeft * 3 + 1]);
-								XMVECTOR vLeftTanOut = dt * XMLoadFloat4(&data[keyLeft * 3 + 2]);
-								XMVECTOR vRightTanIn = dt * XMLoadFloat4(&data[keyRight * 3 + 0]);
+								XMVECTOR vLeftTanOut = key_dt * XMLoadFloat4(&data[keyLeft * 3 + 2]);
+								XMVECTOR vRightTanIn = key_dt * XMLoadFloat4(&data[keyRight * 3 + 0]);
 								XMVECTOR vRight = XMLoadFloat4(&data[keyRight * 3 + 1]);
 								XMVECTOR vAnim = (2 * t3 - 3 * t2 + 1) * vLeft + (t3 - 2 * t2 + t) * vLeftTanOut + (-2 * t3 + 3 * t2) * vRight + (t3 - t2) * vRightTanIn;
 								if (channel.path == AnimationComponent::AnimationChannel::Path::ROTATION)
@@ -2589,12 +2592,14 @@ namespace wi::scene
 							case AnimationComponent::AnimationChannel::PathDataType::Weights:
 							{
 								assert(animationdata->keyframe_data.size() == animationdata->keyframe_times.size() * animation.morph_weights_temp.size() * 3);
-								for (size_t j = 0; j < animation.morph_weights_temp.size(); ++j)
+								// A key is the in-tangents of all weights, then their values, then their out-tangents (like in glTF):
+								const size_t count = animation.morph_weights_temp.size();
+								for (size_t j = 0; j < count; ++j)
 								{
-									float vLeft = animationdata->keyframe_data[(keyLeft * animation.morph_weights_temp.size() + j) * 3 + 1];
-									float vLeftTanOut = animationdata->keyframe_data[(keyLeft * animation.morph_weights_temp.size() + j) * 3 + 2];
-									float vRightTanIn = animationdata->keyframe_data[(keyRight * animation.morph_weights_temp.size() + j) * 3 + 0];
-									float vRight = animationdata->keyframe_data[(keyRight * animation.morph_weights_temp.size() + j) * 3 + 1];
+									float vLeft = animationdata->keyframe_data[keyLeft * count * 3 + count + j];
+									float vLeftTanOut = key_dt * animationdata->keyframe_data[keyLeft * count * 3 + count * 2 + j];
+									float vRightTanIn = key_dt * animationdata->keyframe_data[keyRight * count * 3 + j];
+									float vRight = animationdata->keyframe_data[keyRight * count * 3 + count + j];
 									float vAnim = (2 * t3 - 3 * t2 + 1) * vLeft + (t3 - 2 * t2 + t) * vLeftTanOut + (-2 * t3 + 3 * t2) * vRight + (t3 - t2) * vRightTanIn;
 									animation.morph_weights_temp[j] = vAnim;
 								}
@@ -2635,7 +2640,7 @@ namespace wi::scene
 									TransformComponent transform = *source_transform;
 									XMStoreFloat3(&transform.translation_local, bT);
 									XMMATRIX localMatrix = dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix;
-									XMMatrixDecompose(&S, &R, &bT, localMatrix);
+									wi::math::DecomposeTransform(&S, &R, &bT, localMatrix);
 								}
 							}
 							const XMVECTOR T = XMVectorLerp(aT, bT, t);
@@ -2750,7 +2755,7 @@ namespace wi::scene
 									TransformComponent transform = *source_transform;
 									XMStoreFloat3(&transform.scale_local, bS);
 									XMMATRIX localMatrix = dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix;
-									XMMatrixDecompose(&bS, &R, &T, localMatrix);
+									wi::math::DecomposeTransform(&bS, &R, &T, localMatrix);
 								}
 							}
 							const XMVECTOR S = XMVectorLerp(aS, bS, t);

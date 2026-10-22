@@ -69,6 +69,13 @@ target_link_libraries(RetargetAnimationTest PRIVATE WickedEngine)
 add_test(NAME RetargetAnimationTest COMMAND RetargetAnimationTest)
 set_target_properties(RetargetAnimationTest PROPERTIES FOLDER "Tests")
 
+add_executable(CubicSplineAnimationTest
+	CubicSplineAnimationTest.cpp
+)
+target_link_libraries(CubicSplineAnimationTest PRIVATE WickedEngine)
+add_test(NAME CubicSplineAnimationTest COMMAND CubicSplineAnimationTest)
+set_target_properties(CubicSplineAnimationTest PROPERTIES FOLDER "Tests")
+
 # Linux only: elsewhere the error message box of the failed device creation is modal
 if (UNIX AND NOT APPLE)
 	add_executable(GraphicsDeviceFatalErrorTest

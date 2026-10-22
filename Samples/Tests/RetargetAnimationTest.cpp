@@ -144,7 +144,6 @@ namespace
 		AnimationComponent& animation = *scene.animations.GetComponent(animation_entity);
 		animation.timer = time;
 		animation.last_update_time = time - 1;
-		scene.dt = 1; // RunAnimationUpdateSystem() scales the cubic spline tangents with it, it is the time between the keys
 		scene.ScanAnimationDependencies();
 		wi::jobsystem::context ctx;
 		scene.RunAnimationUpdateSystem(ctx);
