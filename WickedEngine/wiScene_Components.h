@@ -1830,6 +1830,13 @@ namespace wi::scene
 			wi::ecs::Entity source = wi::ecs::INVALID_ENTITY;
 			XMFLOAT4X4 dstRelativeMatrix = wi::math::IDENTITY_MATRIX;
 			XMFLOAT4X4 srcRelativeParentMatrix = wi::math::IDENTITY_MATRIX;
+
+			// Bakes the keys of a translation, rotation or scale channel retargeted from the source, so that they play the same as
+			//	the source keys retargeted while playing: dstRelativeMatrix * source local matrix with the key * srcRelativeParentMatrix
+			//	(see Scene::RunAnimationUpdateSystem()). source is the transform of the source entity, other paths are left unchanged.
+			//	cubic: the keys are cubic spline keys (in-tangent, value, out-tangent), the tangents are carried through the derivative
+			//	of the retargeting, and rotation keys keep the hemisphere relation of the source keys (otherwise they go the short way).
+			void BakeKeyframes(const TransformComponent& source, AnimationChannel::Path path, bool cubic, wi::vector<float>& keyframe_data) const;
 		};
 
 		wi::vector<AnimationChannel> channels;

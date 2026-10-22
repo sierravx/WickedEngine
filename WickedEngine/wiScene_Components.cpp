@@ -2260,6 +2260,102 @@ namespace wi::scene
 		return PathDataType::Event;
 	}
 
+	void AnimationComponent::RetargetSourceData::BakeKeyframes(const TransformComponent& source, AnimationChannel::Path path, bool cubic, wi::vector<float>& keyframe_data) const
+	{
+		using Path = AnimationChannel::Path;
+		if (path != Path::TRANSLATION && path != Path::ROTATION && path != Path::SCALE)
+			return;
+
+		const XMMATRIX dstRelative = XMLoadFloat4x4(&dstRelativeMatrix);
+		const XMMATRIX srcRelativeParent = XMLoadFloat4x4(&srcRelativeParentMatrix);
+		const size_t components = path == Path::ROTATION ? 4 : 3;
+		auto load = [&](size_t offset) {
+			return path == Path::ROTATION ? XMLoadFloat4((const XMFLOAT4*)&keyframe_data[offset]) : XMLoadFloat3((const XMFLOAT3*)&keyframe_data[offset]);
+		};
+		auto store = [&](size_t offset, XMVECTOR V) {
+			if (path == Path::ROTATION)
+			{
+				XMStoreFloat4((XMFLOAT4*)&keyframe_data[offset], V);
+			}
+			else
+			{
+				XMStoreFloat3((XMFLOAT3*)&keyframe_data[offset], V);
+			}
+		};
+		// The retargeting of a value, like while playing. Playing normalizes an interpolated rotation before it is retargeted,
+		//	so a rotation is retargeted as a unit quaternion, and it keeps its length (which is 1 for rotation keys):
+		auto retargeted = [&](XMVECTOR V) {
+			TransformComponent transform = source;
+			switch (path)
+			{
+			case Path::TRANSLATION:
+				XMStoreFloat3(&transform.translation_local, V);
+				break;
+			case Path::ROTATION:
+				XMStoreFloat4(&transform.rotation_local, XMQuaternionNormalize(V));
+				break;
+			default:
+				XMStoreFloat3(&transform.scale_local, V);
+				break;
+			}
+			XMVECTOR S, R, T;
+			wi::math::DecomposeTransform(&S, &R, &T, dstRelative * transform.GetLocalMatrix() * srcRelativeParent);
+			return path == Path::TRANSLATION ? T : (path == Path::ROTATION ? R * XMVector4Length(V) : S);
+		};
+		// The derivative of the retargeting at value (retargeted to result), in the direction of tangent:
+		auto retargeted_tangent = [&](XMVECTOR value, XMVECTOR result, XMVECTOR tangent) {
+			if (path == Path::TRANSLATION)
+			{
+				return retargeted(value + tangent) - result; // the translation is retargeted by an affine function
+			}
+			if (path == Path::ROTATION)
+			{
+				// The part of the tangent along the rotation scales it, the rest turns it:
+				const XMVECTOR unit = XMQuaternionNormalize(value);
+				const XMVECTOR radial = XMVector4Dot(tangent, unit);
+				const XMVECTOR turn = tangent - radial * unit;
+				const float step = 0.001f / std::max(1.0f, XMVectorGetX(XMVector4Length(turn)));
+				auto aligned = [&](XMVECTOR Q) { return XMVectorGetX(XMVector4Dot(Q, result)) < 0 ? -Q : Q; };
+				const XMVECTOR a = aligned(retargeted(XMQuaternionNormalize(unit + step * turn)));
+				const XMVECTOR b = aligned(retargeted(XMQuaternionNormalize(unit - step * turn)));
+				return (a - b) / (2 * step) + radial * aligned(retargeted(unit));
+			}
+			// The step follows the size of the scale, for the precision of large scales:
+			const float step = 0.001f * std::max(1.0f, XMVectorGetX(XMVector3Length(value))) / std::max(1.0f, XMVectorGetX(XMVector3Length(tangent)));
+			return (retargeted(value + step * tangent) - retargeted(value - step * tangent)) / (2 * step);
+		};
+
+		// A cubic spline key is an in-tangent, a value and an out-tangent:
+		const size_t stride = cubic ? components * 3 : components;
+		const size_t value_offset = cubic ? components : 0;
+		XMVECTOR previous_value = XMVectorZero();
+		XMVECTOR previous_result = XMVectorZero();
+		for (size_t offset = 0; offset + stride <= keyframe_data.size(); offset += stride)
+		{
+			const XMVECTOR value = load(offset + value_offset);
+			const XMVECTOR result = retargeted(value);
+			// A decomposed rotation can come out as either of its two quaternions. For cubic splines, which interpolate
+			//	the quaternions as they are, the one is taken that keeps the hemisphere relation of the source keys (playing
+			//	interpolates them, then retargets); otherwise the one in the hemisphere of the previous key (the short way, as
+			//	the slerp of playing goes):
+			float sign = 1;
+			if (path == Path::ROTATION && offset > 0)
+			{
+				const bool source_flips = cubic && XMVectorGetX(XMVector4Dot(value, previous_value)) < 0;
+				const bool result_flips = XMVectorGetX(XMVector4Dot(result, previous_result)) < 0;
+				sign = source_flips == result_flips ? 1.0f : -1.0f;
+			}
+			if (cubic)
+			{
+				store(offset, sign * retargeted_tangent(value, result, load(offset)));
+				store(offset + 2 * components, sign * retargeted_tangent(value, result, load(offset + 2 * components)));
+			}
+			store(offset + value_offset, sign * result);
+			previous_value = value;
+			previous_result = sign * result;
+		}
+	}
+
 	void SoftBodyPhysicsComponent::CreateFromMesh(MeshComponent& mesh)
 	{
 		if (weights.size() != mesh.vertex_positions.size())

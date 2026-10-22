@@ -5129,102 +5129,6 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			return accessor_index;
 		};
 
-		// A channel retargeted without baking is evaluated from the keys of the source animation at runtime, as
-		//	dstRelativeMatrix * source local transform * srcRelativeParentMatrix (see Scene::RunAnimationUpdateSystem()),
-		//	it is baked the same way. The tangents of cubic spline keys are derivatives, they are carried through the
-		//	derivative of the retargeting.
-		auto bake_retarget = [](const AnimationComponent::RetargetSourceData& retarget, const TransformComponent& source, Path path, bool cubic, wi::vector<float>& values) {
-			const XMMATRIX dstRelativeMatrix = XMLoadFloat4x4(&retarget.dstRelativeMatrix);
-			const XMMATRIX srcRelativeParentMatrix = XMLoadFloat4x4(&retarget.srcRelativeParentMatrix);
-			const size_t components = path == Path::ROTATION ? 4 : 3;
-			auto load = [&](size_t offset) {
-				return path == Path::ROTATION ? XMLoadFloat4((const XMFLOAT4*)&values[offset]) : XMLoadFloat3((const XMFLOAT3*)&values[offset]);
-			};
-			auto store = [&](size_t offset, XMVECTOR V) {
-				if (path == Path::ROTATION)
-				{
-					XMStoreFloat4((XMFLOAT4*)&values[offset], V);
-				}
-				else
-				{
-					XMStoreFloat3((XMFLOAT3*)&values[offset], V);
-				}
-			};
-			auto retargeted = [&](XMVECTOR V) {
-				TransformComponent transform = source;
-				if (path == Path::TRANSLATION)
-				{
-					XMStoreFloat3(&transform.translation_local, V);
-				}
-				else if (path == Path::ROTATION)
-				{
-					XMStoreFloat4(&transform.rotation_local, V);
-				}
-				else
-				{
-					XMStoreFloat3(&transform.scale_local, V);
-				}
-				XMVECTOR S, R, T;
-				wi::math::DecomposeTransform(&S, &R, &T, dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix);
-				return path == Path::TRANSLATION ? T : (path == Path::ROTATION ? R : S);
-			};
-			// The derivative of the retargeting at value (retargeted to result), in the direction of tangent:
-			auto retargeted_tangent = [&](XMVECTOR value, XMVECTOR result, XMVECTOR tangent) {
-				if (path == Path::TRANSLATION)
-				{
-					return retargeted(value + tangent) - result; // the translation is retargeted by an affine function
-				}
-				if (path == Path::ROTATION)
-				{
-					// For unit quaternions, the part of the tangent along the rotation scales it, the rest turns it:
-					const XMVECTOR unit = XMQuaternionNormalize(value);
-					const XMVECTOR radial = XMVector4Dot(tangent, unit);
-					const XMVECTOR turn = tangent - radial * unit;
-					const float step = 0.001f / std::max(1.0f, XMVectorGetX(XMVector4Length(turn)));
-					XMVECTOR a = retargeted(XMQuaternionNormalize(unit + step * turn));
-					XMVECTOR b = retargeted(XMQuaternionNormalize(unit - step * turn));
-					if (XMVectorGetX(XMVector4Dot(a, result)) < 0)
-						a = -a;
-					if (XMVectorGetX(XMVector4Dot(b, result)) < 0)
-						b = -b;
-					return (a - b) / (2 * step) + radial * result;
-				}
-				// The step follows the size of the scale, for the precision of large scales:
-				const float step = 0.001f * std::max(1.0f, XMVectorGetX(XMVector3Length(value))) / std::max(1.0f, XMVectorGetX(XMVector3Length(tangent)));
-				return (retargeted(value + step * tangent) - retargeted(value - step * tangent)) / (2 * step);
-			};
-
-			// A cubic spline key is an in-tangent, a value and an out-tangent:
-			const size_t stride = cubic ? components * 3 : components;
-			const size_t value_offset = cubic ? components : 0;
-			XMVECTOR previous_value = XMVectorZero();
-			XMVECTOR previous_result = XMVectorZero();
-			for (size_t offset = 0; offset + stride <= values.size(); offset += stride)
-			{
-				const XMVECTOR value = load(offset + value_offset);
-				const XMVECTOR result = retargeted(value);
-				// A decomposed rotation can come out as either of its two quaternions. For cubic splines, which interpolate
-				//	the quaternions as they are, the one is taken that keeps the hemisphere relation of the source keys (the runtime
-				//	interpolates them, then retargets); otherwise the one in the hemisphere of the previous key (the short way, as
-				//	the runtime's slerp goes):
-				float sign = 1;
-				if (path == Path::ROTATION && offset > 0)
-				{
-					const bool source_flips = cubic && XMVectorGetX(XMVector4Dot(value, previous_value)) < 0;
-					const bool result_flips = XMVectorGetX(XMVector4Dot(result, previous_result)) < 0;
-					sign = source_flips == result_flips ? 1.0f : -1.0f;
-				}
-				if (cubic)
-				{
-					store(offset, sign * retargeted_tangent(value, result, load(offset)));
-					store(offset + 2 * components, sign * retargeted_tangent(value, result, load(offset + 2 * components)));
-				}
-				store(offset + value_offset, sign * result);
-				previous_value = value;
-				previous_result = sign * result;
-			}
-		};
-
 		// Light nodes are written with a forward flip in their rotation (see the nodes above), their rotation keys get it too:
 		const XMVECTOR light_forward_flip = XMQuaternionRotationRollPitchYaw(-XM_PIDIV2, 0, 0);
 
@@ -5431,10 +5335,10 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					sampler_builder.input = get_input_accessor(exported.data_scene, sampler.data, *exported.data);
 					if (exported.baked)
 					{
-						// The keys are baked for each sampler and retarget:
+						// The keys are baked for each sampler and retarget, like Scene::RetargetAnimation() bakes them:
 						const AnimationComponent::RetargetSourceData& retarget = animation.retargets[channel.retargetIndex];
 						wi::vector<float> values = exported.data->keyframe_data;
-						bake_retarget(retarget, *exported.data_scene->transforms.GetComponent(retarget.source), channel.path, sampler.mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE, values);
+						retarget.BakeKeyframes(*exported.data_scene->transforms.GetComponent(retarget.source), channel.path, sampler.mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE, values);
 						if (exported.changes & KEYS_LIGHT_FLIP)
 						{
 							RotateRotationKeys(light_forward_flip, values);

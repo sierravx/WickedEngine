@@ -9355,8 +9355,10 @@ namespace wi::scene
 							XMMATRIX dstMatrix = transform_dest->GetLocalMatrix() * dstParentMatrix;
 							XMMATRIX inverseDstParentMatrix = XMMatrixInverse(nullptr, dstParentMatrix);
 
-							XMMATRIX dstRelativeMatrix = dstMatrix * inverseSrcMatrix;
-							XMMATRIX srcRelativeParentMatrix = srcParentMatrix * inverseDstParentMatrix;
+							AnimationComponent::RetargetSourceData retarget;
+							retarget.source = bone_source;
+							XMStoreFloat4x4(&retarget.dstRelativeMatrix, dstMatrix * inverseSrcMatrix);
+							XMStoreFloat4x4(&retarget.srcRelativeParentMatrix, srcParentMatrix * inverseDstParentMatrix);
 
 							if (bake_data)
 							{
@@ -9368,56 +9370,13 @@ namespace wi::scene
 
 								auto& animation_data = src_scene->animation_datas.Contains(sampler.data) ? *src_scene->animation_datas.GetComponent(sampler.data) : sampler.backwards_compatibility_data;
 								retarget_animation_data = animation_data;
-
-								XMVECTOR S, R, T; // matrix decompose destinations
-
-								switch (channel.path)
-								{
-								case AnimationComponent::AnimationChannel::Path::SCALE:
-									for (size_t offset = 0; offset < retarget_animation_data.keyframe_data.size(); offset += 3)
-									{
-										XMFLOAT3* data = (XMFLOAT3*)&retarget_animation_data.keyframe_data[offset];
-										TransformComponent transform = *transform_source;
-										transform.scale_local = *data;
-										XMMATRIX localMatrix = dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix;
-										XMMatrixDecompose(&S, &R, &T, localMatrix);
-										XMStoreFloat3(data, S);
-									}
-									break;
-								case AnimationComponent::AnimationChannel::Path::ROTATION:
-									for (size_t offset = 0; offset < retarget_animation_data.keyframe_data.size(); offset += 4)
-									{
-										XMFLOAT4* data = (XMFLOAT4*)&retarget_animation_data.keyframe_data[offset];
-										TransformComponent transform = *transform_source;
-										transform.rotation_local = *data;
-										XMMATRIX localMatrix = dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix;
-										wi::math::DecomposeTransform(&S, &R, &T, localMatrix);
-										XMStoreFloat4(data, R);
-									}
-									break;
-								case AnimationComponent::AnimationChannel::Path::TRANSLATION:
-									for (size_t offset = 0; offset < retarget_animation_data.keyframe_data.size(); offset += 3)
-									{
-										XMFLOAT3* data = (XMFLOAT3*)&retarget_animation_data.keyframe_data[offset];
-										TransformComponent transform = *transform_source;
-										transform.translation_local = *data;
-										XMMATRIX localMatrix = dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix;
-										XMMatrixDecompose(&S, &R, &T, localMatrix);
-										XMStoreFloat3(data, T);
-									}
-									break;
-								default:
-									break;
-								}
+								retarget.BakeKeyframes(*transform_source, channel.path, sampler.mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE, retarget_animation_data.keyframe_data);
 							}
 							else
 							{
 								// Don't bake retarget data, but inform the animation channel of original source data:
 								retarget_channel.retargetIndex = (int)animation.retargets.size();
-								AnimationComponent::RetargetSourceData& retarget = animation.retargets.emplace_back();
-								retarget.source = bone_source;
-								XMStoreFloat4x4(&retarget.dstRelativeMatrix, dstRelativeMatrix);
-								XMStoreFloat4x4(&retarget.srcRelativeParentMatrix, srcRelativeParentMatrix);
+								animation.retargets.push_back(retarget);
 							}
 						}
 
