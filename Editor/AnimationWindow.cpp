@@ -41,6 +41,7 @@ void AnimationWindow::Create(EditorComponent* _editor)
 	modeComboBox.SetPos(XMFLOAT2(x, y));
 	modeComboBox.SetEnabled(false);
 	modeComboBox.AddItem("Step", AnimationComponent::AnimationSampler::Mode::STEP);
+	modeComboBox.AddItem("Nearest", AnimationComponent::AnimationSampler::Mode::NEAREST);
 	modeComboBox.AddItem("Linear", AnimationComponent::AnimationSampler::Mode::LINEAR);
 	modeComboBox.AddItem("Cubic spline", AnimationComponent::AnimationSampler::Mode::CUBICSPLINE);
 	modeComboBox.OnSelect([this](wi::gui::EventArgs args) {
@@ -69,7 +70,7 @@ void AnimationWindow::Create(EditorComponent* _editor)
 			}
 		}
 	});
-	modeComboBox.SetTooltip("Choose how animation data is interpreted between keyframes.\nNote that Cubic spline sampling requires spline animation data, otherwise, it will fall back to Linear!\nCurrently spline animation data creation is not supported, but it can be imported from GLTF/VRM models.");
+	modeComboBox.SetTooltip("Choose how animation data is interpreted between keyframes.\nStep holds the value of a keyframe until the next keyframe, Nearest switches to the next keyframe halfway between them (Step did this in earlier versions).\nNote that Cubic spline sampling requires spline animation data, otherwise, it will fall back to Linear!\nCurrently spline animation data creation is not supported, but it can be imported from GLTF/VRM models.");
 	AddWidget(&modeComboBox);
 
 	loopTypeButton.Create("LoopType");

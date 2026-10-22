@@ -2393,9 +2393,15 @@ namespace wi::scene
 						{
 						default:
 						case AnimationComponent::AnimationSampler::Mode::STEP:
+						case AnimationComponent::AnimationSampler::Mode::NEAREST:
 						{
-							// Nearest neighbor method:
-							const int key = wi::math::InverseLerp(timeLeft, timeRight, animation.timer) > 0.5f ? keyRight : keyLeft;
+							// Step method: the previous keyframe is held until the time of the next keyframe
+							int key = keyLeft;
+							if (sampler.mode == AnimationComponent::AnimationSampler::Mode::NEAREST)
+							{
+								// Nearest neighbor method:
+								key = wi::math::InverseLerp(timeLeft, timeRight, animation.timer) > 0.5f ? keyRight : keyLeft;
+							}
 							switch (path_data_type)
 							{
 							default:

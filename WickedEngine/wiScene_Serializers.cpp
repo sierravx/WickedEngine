@@ -1516,6 +1516,11 @@ namespace wi::scene
 			{
 				archive >> samplers[i]._flags;
 				archive >> (uint32_t&)samplers[i].mode;
+				if (seri.GetVersion() < 3 && samplers[i].mode == AnimationSampler::Mode::STEP)
+				{
+					// STEP took the nearest keyframe before version 3, now it holds the previous keyframe:
+					samplers[i].mode = AnimationSampler::Mode::NEAREST;
+				}
 				if (archive.GetVersion() < 46)
 				{
 					archive >> samplers[i].backwards_compatibility_data.keyframe_times;
