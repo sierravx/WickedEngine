@@ -1562,9 +1562,11 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 			armature.inverseBindMatrices.resize(accessor.count);
 			memcpy(armature.inverseBindMatrices.data(), &buffer.data[accessor.byteOffset + bufferView.byteOffset], accessor.count * sizeof(XMFLOAT4X4));
 		}
-		else
+		// glTF 2.0 specification, Skins: "When undefined, each matrix is a 4x4 identity matrix." The joints of a file with
+		//	fewer matrices than joints (an invalid file) get the identity too, every bone of the armature needs a matrix:
+		if (armature.inverseBindMatrices.size() < skin.joints.size())
 		{
-			assert(0);
+			armature.inverseBindMatrices.resize(skin.joints.size(), wi::math::IDENTITY_MATRIX);
 		}
 		ImportMetadata(state, armatureEntity, skin.extras);
 	}
