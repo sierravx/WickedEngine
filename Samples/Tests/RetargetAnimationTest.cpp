@@ -101,7 +101,10 @@ namespace
 		return skeleton;
 	}
 
-	// A channel of the source animation on one of the bones, with keys at the times 0, 1 and 2 (cubic spline keys are an
+	// The times of the keys, not a second apart (the tangents of cubic spline keys are scaled by the time between the keys):
+	const float key_times[] = { 0, 0.5f, 2 };
+
+	// A channel of the source animation on one of the bones, with keys at the key times (cubic spline keys are an
 	//	in-tangent, a value and an out-tangent). linear: the retargeting of the keys is a linear (for translations affine) function
 	//	of them for this bone, so the baked keys play exactly the same at all times. Otherwise they play the same at the keys, and
 	//	cubic splines also with the same slopes there.
@@ -125,7 +128,7 @@ namespace
 		{
 			Entity data = CreateEntity();
 			AnimationDataComponent& animation_data = scene.animation_datas.Create(data);
-			animation_data.keyframe_times = { 0, 1, 2 };
+			animation_data.keyframe_times = { key_times[0], key_times[1], key_times[2] };
 			animation_data.keyframe_data = desc.keys;
 			AnimationComponent::AnimationSampler& sampler = animation.samplers.emplace_back();
 			sampler.data = data;
@@ -195,6 +198,7 @@ namespace
 			{ Bone::LeftUpperLeg, 0, XMFLOAT3(0.1f, -0.05f, 0), XMFLOAT3(0.2f, 0.1f, 0.05f), XMFLOAT3(1, 1, 1) },
 			{ Bone::LeftLowerLeg, 4, XMFLOAT3(0, -0.45f, 0), XMFLOAT3(0.2f, 0, 0), XMFLOAT3(1, 1, 1) },
 			{ Bone::LeftFoot, 5, XMFLOAT3(0, -0.4f, 0), XMFLOAT3(-0.3f, 0, 0.1f), XMFLOAT3(1, 1, 1) },
+			{ Bone::Neck, 3, XMFLOAT3(0, 0.15f, 0), XMFLOAT3(0.1f, 0, 0.1f), XMFLOAT3(1, 1, 1) },
 		};
 		const wi::vector<BoneDesc> destination_bones = {
 			{ Bone::Hips, -1, XMFLOAT3(0.2f, 0.9f, -0.1f), XMFLOAT3(-0.3f, 0.5f, 0.2f), XMFLOAT3(0.8f, 0.8f, 0.8f) },
@@ -204,6 +208,7 @@ namespace
 			{ Bone::LeftUpperLeg, 0, XMFLOAT3(0.12f, -0.02f, 0.01f), XMFLOAT3(0.1f, -0.1f, 0.2f), XMFLOAT3(1, 1.1f, 0.95f) },
 			{ Bone::LeftLowerLeg, 4, XMFLOAT3(0, -0.5f, 0), XMFLOAT3(0.1f, 0.2f, 0), XMFLOAT3(1, 1, 1) },
 			{ Bone::LeftFoot, 5, XMFLOAT3(0, -0.45f, 0), XMFLOAT3(-0.2f, 0.1f, 0), XMFLOAT3(1, 1, 1) },
+			{ Bone::Neck, 3, XMFLOAT3(0, 0.18f, 0), XMFLOAT3(0, 0, 0), XMFLOAT3(1, 1, 1), true },
 		};
 
 		// Rotation keys go to the other hemisphere and back, rotation tangents have parts along the rotations too:
@@ -248,6 +253,12 @@ namespace
 			}, false },
 			{ "linear rotation under non-uniform scale", 6, Path::ROTATION, Mode::LINEAR, Flatten({ Rotation(-0.2f, 0.1f, 0.1f), Rotation(-0.5f, 0, 0.2f, -1), Rotation(0.1f, -0.1f, 0) }), false },
 			{ "linear scale under non-uniform scale", 6, Path::SCALE, Mode::LINEAR, { 1, 1, 1, 1.3f, 0.8f, 1.1f, 0.9f, 1.2f, 0.7f }, false },
+			// A scale that grows from zero: the retargeted scale has a kink at zero, which the baked tangent must not span
+			{ "cubic scale from zero", 7, Path::SCALE, Mode::CUBICSPLINE, {
+				0, 0, 0, 0, 0, 0, 3, 3, 3,
+				1, 1, 1, 1, 1, 1, 0.5f, 0.5f, 0.5f,
+				0.2f, 0.2f, 0.2f, 1.2f, 1.2f, 1.2f, 0, 0, 0,
+			}, true },
 		};
 
 		Scene other_scene;
@@ -284,7 +295,7 @@ namespace
 			const wi::vector<XMFLOAT4> runtime_values = playback(runtime, time);
 			for (size_t c = 0; c < channels.size(); ++c)
 			{
-				if (channels[c].linear || i % 20 == 0)
+				if (channels[c].linear || time == key_times[0] || time == key_times[1] || time == key_times[2])
 				{
 					const XMVECTOR baked_value = XMLoadFloat4(&baked_values[c]);
 					const XMVECTOR runtime_value = Aligned(XMLoadFloat4(&runtime_values[c]), baked_value, channels[c].path);
@@ -316,7 +327,7 @@ namespace
 			return result;
 		};
 		wi::vector<float> max_slope_difference(channels.size(), 0.0f);
-		const float sides[][2] = { { 0, 1 }, { 1, -1 }, { 1, 1 }, { 2, -1 } }; // time, side
+		const float sides[][2] = { { key_times[0], 1 }, { key_times[1], -1 }, { key_times[1], 1 }, { key_times[2], -1 } }; // time, side
 		for (const auto& side : sides)
 		{
 			const wi::vector<XMFLOAT4> baked_at_key = playback(baked, side[0]);

@@ -96,8 +96,10 @@ void AnimationWindow::Create(EditorComponent* _editor)
 						break;
 					}
 
-					// Cubic spline data contains in-tangent, value and out-tangent for every keyframe:
-					const AnimationDataComponent* animationdata = scene.animation_datas.GetComponent(sampler.data);
+					// Cubic spline data contains in-tangent, value and out-tangent for every keyframe (the data can be in an other
+					//	scene, like for an animation retargeted from it without baking):
+					const Scene& data_scene = sampler.scene == nullptr ? scene : *(const Scene*)sampler.scene;
+					const AnimationDataComponent* animationdata = data_scene.animation_datas.GetComponent(sampler.data);
 					if (animationdata == nullptr || components == 0)
 					{
 						sampler.mode = AnimationComponent::AnimationSampler::Mode::LINEAR;

@@ -2318,8 +2318,9 @@ namespace wi::scene
 				return RetargetValue(source, path, XMQuaternionNormalize(V)) * XMVector4Length(V);
 			return RetargetValue(source, path, V);
 		};
-		// The derivative of the retargeting at value (retargeted to result), in the direction of tangent:
-		auto retargeted_tangent = [&](XMVECTOR value, XMVECTOR result, XMVECTOR tangent) {
+		// The derivative of the retargeting at value (retargeted to result), in the direction of tangent. side is the side of the
+		//	key on which the tangent is used: -1 for the in-tangent (the curve before the key), 1 for the out-tangent (after it):
+		auto retargeted_tangent = [&](XMVECTOR value, XMVECTOR result, XMVECTOR tangent, float side) {
 			if (path == Path::TRANSLATION)
 			{
 				return retargeted(value + tangent) - result; // the translation is retargeted by an affine function
@@ -2338,6 +2339,20 @@ namespace wi::scene
 			}
 			// The step follows the size of the scale, for the precision of large scales:
 			const float step = 0.001f * std::max(1.0f, XMVectorGetX(XMVector3Length(value))) / std::max(1.0f, XMVectorGetX(XMVector3Length(tangent)));
+			// The retargeted scale has a kink (and can be mirrored) where a part of the scale is zero. When the steps on both
+			//	sides would reach it, the derivative is taken on the side of the tangent only, from points after the key (the key
+			//	itself can be on the kink): the second order one-sided difference of retargeted(value + side * s * tangent).
+			XMFLOAT3 before, after;
+			XMStoreFloat3(&before, value - step * tangent);
+			XMStoreFloat3(&after, value + step * tangent);
+			if (before.x * after.x <= 0 || before.y * after.y <= 0 || before.z * after.z <= 0)
+			{
+				const XMVECTOR direction = side * tangent;
+				const XMVECTOR f1 = retargeted(value + step * direction);
+				const XMVECTOR f2 = retargeted(value + 2 * step * direction);
+				const XMVECTOR f3 = retargeted(value + 3 * step * direction);
+				return side * (-5 * f1 + 8 * f2 - 3 * f3) / (2 * step);
+			}
 			return (retargeted(value + step * tangent) - retargeted(value - step * tangent)) / (2 * step);
 		};
 
@@ -2363,8 +2378,8 @@ namespace wi::scene
 			}
 			if (cubic)
 			{
-				store(offset, sign * retargeted_tangent(value, result, load(offset)));
-				store(offset + 2 * components, sign * retargeted_tangent(value, result, load(offset + 2 * components)));
+				store(offset, sign * retargeted_tangent(value, result, load(offset), -1));
+				store(offset + 2 * components, sign * retargeted_tangent(value, result, load(offset + 2 * components), 1));
 			}
 			store(offset + value_offset, sign * result);
 			previous_value = value;
