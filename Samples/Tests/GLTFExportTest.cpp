@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <iterator>
 #include <set>
 #include <string>
 #include <sys/wait.h>
@@ -21,7 +22,8 @@
 // Regression test for the animation export of the editor's glTF exporter: only channels that glTF can hold are written,
 //	retargeted channels are baked, the file is valid, and the scene is restored after the export. Also the import of glTF
 //	lights: the rotation keys of light nodes, the names of light nodes, the lights of mesh and camera nodes (also after an
-//	export and an import), and the extras of a node merged with the extras of its light and camera.
+//	export and an import), the extras of a node merged with the extras of its light and camera, the cameras of camera
+//	nodes, and the export of a light on the same entity as a mesh or a camera.
 //	The exporter updates the scene, which needs a graphics device: the test runs in a child process that creates a Vulkan
 //	device (like Mesa's software lavapipe), and it is skipped if there is none.
 
@@ -475,6 +477,215 @@ namespace
 		check_nodes(reimported, "after an export and an import");
 	}
 
+	// Import: each camera node gets the values of its own glTF camera, also when cameras are shared by nodes, are in an
+	//	other order than the nodes, or are orthographic (which the import does not support, the node gets the defaults)
+	void CheckCameraImport()
+	{
+		const char* cameras_file = "GLTFImportTest_cameras.gltf";
+		bool written = false;
+		if (FILE* gltf = fopen(cameras_file, "w"))
+		{
+			written = fputs(R"({
+	"asset": { "version": "2.0" },
+	"scene": 0,
+	"scenes": [ { "nodes": [ 0, 1, 2, 3, 4 ] } ],
+	"nodes": [
+		{ "name": "CameraA", "camera": 2 },
+		{ "name": "CameraB", "camera": 0 },
+		{ "name": "CameraC", "camera": 0 },
+		{ "name": "OrthographicCamera", "camera": 1 },
+		{ "name": "CameraD", "camera": 2 }
+	],
+	"cameras": [
+		{ "type": "perspective", "perspective": { "yfov": 0.5, "znear": 0.1, "zfar": 100 }, "extras": { "camera": 0 } },
+		{ "type": "orthographic", "orthographic": { "xmag": 1, "ymag": 1, "znear": 0.5, "zfar": 10 }, "extras": { "camera": 1 } },
+		{ "type": "perspective", "perspective": { "yfov": 1.2, "aspectRatio": 2, "znear": 0.2, "zfar": 200 }, "extras": { "camera": 2 } }
+	]
+})", gltf) >= 0;
+			written &= fclose(gltf) == 0;
+		}
+		Check(written, "the glTF file of the camera test could not be written");
+		if (!written)
+		{
+			std::remove(cameras_file);
+			return;
+		}
+
+		Scene scene;
+		ImportModel_GLTF(cameras_file, scene);
+		std::remove(cameras_file);
+
+		struct ExpectedCamera
+		{
+			const char* name;
+			float fov, aspect, znear, zfar;
+			int camera; // the glTF camera, in the extras
+		};
+		const ExpectedCamera expected[] = {
+			{ "CameraA", 1.2f, 2, 0.2f, 200, 2 },
+			{ "CameraB", 0.5f, 16.0f / 9.0f, 0.1f, 100, 0 },
+			{ "CameraC", 0.5f, 16.0f / 9.0f, 0.1f, 100, 0 },
+			{ "OrthographicCamera", XM_PIDIV4, 16.0f / 9.0f, 0.01f, 1000, 1 }, // (the defaults of Scene::Entity_CreateCamera())
+			{ "CameraD", 1.2f, 2, 0.2f, 200, 2 },
+		};
+		auto check_cameras = [&](Scene& imported, bool extras, const std::string& when) {
+			Check(imported.cameras.GetCount() == std::size(expected), "the camera nodes did not import as " + std::to_string(std::size(expected)) + " cameras " + when);
+			for (const ExpectedCamera& x : expected)
+			{
+				const Entity entity = imported.Entity_FindByName(x.name);
+				const CameraComponent* camera = imported.cameras.GetComponent(entity);
+				Check(camera != nullptr && camera->height > 0 && Near({ camera->fov, camera->width / camera->height, camera->zNearP, camera->zFarP }, { x.fov, x.aspect, x.znear, x.zfar }),
+					std::string("the camera node ") + x.name + " did not get the values of its camera " + when);
+				if (extras)
+				{
+					const MetadataComponent* metadata = imported.metadatas.GetComponent(entity);
+					Check(metadata != nullptr && metadata->int_values.has("camera") && metadata->int_values.get("camera") == x.camera,
+						std::string("the camera node ") + x.name + " did not get the extras of its camera " + when);
+				}
+			}
+		};
+		check_cameras(scene, true, "after the import");
+
+		// Export and import back (the exporter doesn't write extras):
+		RemoveOutputFiles();
+		ExportModel_GLTF(output_file, scene);
+		Scene reimported;
+		ImportModel_GLTF(output_file, reimported);
+		RemoveOutputFiles();
+		check_cameras(reimported, false, "after an export and an import");
+	}
+
+	// Export: a light on the same entity as a mesh or a camera is written to a child node, so the rotation of the light (glTF
+	//	lights point forward, engine lights down) does not turn the mesh or the camera, nor the rotation keys of the entity
+	void CheckLightOnMeshExport()
+	{
+		Scene scene;
+		Entity material = CreateEntity();
+		scene.materials.Create(material);
+		Entity mesh = CreateMorphedMesh(scene, material);
+		Entity lamp_mesh = CreateNode(scene, "LampMesh", XMFLOAT3(1, 2, 3), XMFLOAT3(0.3f, 0.5f, 0.2f));
+		scene.objects.Create(lamp_mesh).meshID = mesh;
+		scene.lights.Create(lamp_mesh).SetType(LightComponent::SPOT);
+		Entity lamp_camera = scene.Entity_CreateCamera("LampCamera", 16, 9);
+		{
+			TransformComponent& transform = *scene.transforms.GetComponent(lamp_camera);
+			transform.RotateRollPitchYaw(XMFLOAT3(-0.2f, 0.4f, 0.1f));
+			transform.Translate(XMFLOAT3(4, 5, 6));
+			transform.UpdateTransform();
+		}
+		scene.lights.Create(lamp_camera).SetType(LightComponent::POINT);
+
+		// Rotation keys of the entity with the mesh and the light:
+		XMFLOAT4 k0, k1;
+		XMStoreFloat4(&k0, XMQuaternionRotationRollPitchYaw(0.1f, 0.2f, 0.3f));
+		XMStoreFloat4(&k1, XMQuaternionRotationRollPitchYaw(0.4f, -0.3f, 0.2f));
+		const wi::vector<float> keys = { k0.x, k0.y, k0.z, k0.w, k1.x, k1.y, k1.z, k1.w };
+		Entity animation_entity = CreateEntity();
+		scene.names.Create(animation_entity) = "lamp_animation";
+		{
+			AnimationComponent& animation = scene.animations.Create(animation_entity);
+			animation.samplers.emplace_back().data = CreateData(scene, { 0, 1 }, keys);
+			AnimationComponent::AnimationChannel& channel = animation.channels.emplace_back();
+			channel.target = lamp_mesh;
+			channel.samplerIndex = 0;
+			channel.path = Path::ROTATION;
+		}
+		const TransformComponent mesh_original = *scene.transforms.GetComponent(lamp_mesh);
+		const TransformComponent camera_original = *scene.transforms.GetComponent(lamp_camera);
+
+		RemoveOutputFiles();
+		ExportModel_GLTF(output_file, scene);
+
+		// The file: the node has the mesh or the camera and the transform of the entity (in the glTF space), its child node the light
+		tinygltf::TinyGLTF loader;
+		tinygltf::Model model;
+		std::string err, warn;
+		if (!loader.LoadASCIIFromFile(&model, &err, &warn, output_file))
+		{
+			Check(false, "the exported file of the light on a mesh could not be loaded: " + err);
+			RemoveOutputFiles();
+			return;
+		}
+		const XMVECTOR light_child_rotation = XMQuaternionRotationRollPitchYaw(-XM_PIDIV2, 0, 0); // undone by the import
+		for (auto [name, original] : { std::make_pair("LampMesh", &mesh_original), std::make_pair("LampCamera", &camera_original) })
+		{
+			auto node = std::find_if(model.nodes.begin(), model.nodes.end(), [&](const tinygltf::Node& node) { return node.name == name; });
+			if (node == model.nodes.end() || node->rotation.size() != 4 || node->children.size() != 1)
+			{
+				Check(false, std::string("the node ") + name + " was not written with one child");
+				continue;
+			}
+			const XMVECTOR rotation = XMVectorSet(float(node->rotation[0]), float(node->rotation[1]), float(node->rotation[2]), float(node->rotation[3]));
+			Check(node->light < 0 && (node->mesh >= 0 || node->camera >= 0) && SameRotation(rotation, MirrorRotation(XMLoadFloat4(&original->rotation_local))),
+				std::string("the node ") + name + " was written with the light or with the rotation of the light");
+			const tinygltf::Node& child = model.nodes[node->children[0]];
+			Check(child.light >= 0 && child.mesh < 0 && child.camera < 0 && child.rotation.size() == 4 &&
+				SameRotation(XMVectorSet(float(child.rotation[0]), float(child.rotation[1]), float(child.rotation[2]), float(child.rotation[3])), light_child_rotation),
+				std::string("the light of ") + name + " was not written to a child node with the rotation of a light");
+		}
+		{
+			bool same = false;
+			for (const tinygltf::Animation& animation : model.animations)
+			{
+				for (const tinygltf::AnimationChannel& channel : animation.channels)
+				{
+					if (channel.target_path != "rotation" || channel.target_node < 0 || model.nodes[channel.target_node].name != "LampMesh")
+						continue;
+					const wi::vector<float> values = ReadAccessor(model, animation.samplers[channel.sampler].output);
+					same = values.size() == keys.size();
+					for (size_t i = 0; same && i + 4 <= values.size(); i += 4)
+					{
+						same = SameRotation(XMLoadFloat4((const XMFLOAT4*)&values[i]), MirrorRotation(XMLoadFloat4((const XMFLOAT4*)&keys[i])));
+					}
+				}
+			}
+			Check(same, "the rotation keys of an entity with a mesh and a light were written with the rotation of the light");
+		}
+
+		// Import back: the entity keeps its transform and rotation keys, its light child points where the light pointed
+		Scene imported;
+		ImportModel_GLTF(output_file, imported);
+		RemoveOutputFiles();
+		for (auto [name, original] : { std::make_pair("LampMesh", &mesh_original), std::make_pair("LampCamera", &camera_original) })
+		{
+			const Entity entity = imported.Entity_FindByName(name);
+			const TransformComponent* transform = imported.transforms.GetComponent(entity);
+			Check(transform != nullptr && SameRotation(XMLoadFloat4(&transform->rotation_local), XMLoadFloat4(&original->rotation_local)) &&
+				Near({ transform->translation_local.x, transform->translation_local.y, transform->translation_local.z }, { original->translation_local.x, original->translation_local.y, original->translation_local.z }),
+				std::string("the entity ") + name + " did not import back with its transform");
+			const Entity light = LightChildOf(imported, entity);
+			const TransformComponent* light_transform = imported.transforms.GetComponent(light);
+			Check(light_transform != nullptr && SameRotation(XMLoadFloat4(&light_transform->rotation_local), XMQuaternionIdentity()),
+				std::string("the light of ") + name + " did not import back as a child pointing like the light");
+		}
+		Check(imported.objects.Contains(imported.Entity_FindByName("LampMesh")) && imported.cameras.Contains(imported.Entity_FindByName("LampCamera")) &&
+			imported.lights.GetCount() == 2 && imported.lights.GetComponent(LightChildOf(imported, imported.Entity_FindByName("LampMesh")))->GetType() == LightComponent::SPOT &&
+			imported.lights.GetComponent(LightChildOf(imported, imported.Entity_FindByName("LampCamera")))->GetType() == LightComponent::POINT,
+			"the mesh, the camera and their lights did not import back");
+		{
+			const Entity target = imported.Entity_FindByName("LampMesh");
+			wi::vector<float> imported_keys;
+			for (size_t i = 0; i < imported.animations.GetCount(); ++i)
+			{
+				for (const AnimationComponent::AnimationChannel& channel : imported.animations[i].channels)
+				{
+					if (channel.target == target && channel.path == Path::ROTATION && channel.samplerIndex >= 0 && channel.samplerIndex < (int)imported.animations[i].samplers.size())
+					{
+						const AnimationDataComponent* data = imported.animation_datas.GetComponent(imported.animations[i].samplers[channel.samplerIndex].data);
+						if (data != nullptr)
+							imported_keys = data->keyframe_data;
+					}
+				}
+			}
+			bool same = imported_keys.size() == keys.size();
+			for (size_t i = 0; same && i + 4 <= keys.size(); i += 4)
+			{
+				same = SameRotation(XMLoadFloat4((const XMFLOAT4*)&imported_keys[i]), XMLoadFloat4((const XMFLOAT4*)&keys[i]));
+			}
+			Check(same, "the rotation keys of an entity with a mesh and a light did not import back as they were");
+		}
+	}
+
 	int RunExport(int device_created_pipe)
 	{
 		wi::jobsystem::Initialize();
@@ -487,6 +698,8 @@ namespace
 		CheckSharedSamplerImport();
 		CheckLightNodeNames();
 		CheckLightNodeComponents();
+		CheckCameraImport();
+		CheckLightOnMeshExport();
 
 		RemoveOutputFiles(); // the files of an earlier run must not be checked
 

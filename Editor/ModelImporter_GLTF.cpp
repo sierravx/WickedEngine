@@ -149,6 +149,7 @@ struct LoaderState
 	Scene* scene;
 	wi::unordered_map<int, Entity> entityMap;  // node -> entity
 	std::unordered_multimap<int, Entity> punctualLightMap;  // KHR_lights_punctual -> entities
+	std::unordered_multimap<int, Entity> cameraMap;  // camera -> entities
 	int lightID = 0; // numbers the names of the light nodes that have no name
 	Entity rootEntity = INVALID_ENTITY;
 
@@ -267,7 +268,8 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 			node.name = "cam" + std::to_string(camID++);
 		}
 
-		entity = scene.Entity_CreateCamera(node.name, 16, 9);
+		entity = scene.Entity_CreateCamera(node.name, 16, 9); // camera component will be filled later
+		state.cameraMap.insert({ node.camera, entity });
 	}
 
 	Entity light_child = INVALID_ENTITY; // the light of a node that is also a mesh or a camera
@@ -1865,24 +1867,30 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 		}
 	}
 
+	// Fill the cameras of the nodes (a camera can be used by several nodes, the camera components are not in the order of the glTF cameras):
 	int cameraIndex = 0;
 	for (auto& x : state.gltfModel.cameras)
 	{
-		if (!x.type.compare("orthographic"))
-			continue;
-		Entity entity = scene.cameras.GetEntity(cameraIndex);
-		CameraComponent& camera = scene.cameras[cameraIndex++];
-
-		if (x.perspective.aspectRatio > 0)
+		for (auto [it, end] = state.cameraMap.equal_range(cameraIndex); it != end; it++)
 		{
-			camera.width = float(x.perspective.aspectRatio);
-			camera.height = 1.f;
-		}
-		camera.fov = (float)x.perspective.yfov;
-		camera.zFarP = (float)x.perspective.zfar;
-		camera.zNearP = (float)x.perspective.znear;
+			Entity entity = it->second;
+			CameraComponent& camera = *scene.cameras.GetComponent(entity);
 
-		ImportMetadata(state, entity, x.extras, true);
+			if (x.type.compare("orthographic"))
+			{
+				if (x.perspective.aspectRatio > 0)
+				{
+					camera.width = float(x.perspective.aspectRatio);
+					camera.height = 1.f;
+				}
+				camera.fov = (float)x.perspective.yfov;
+				camera.zFarP = (float)x.perspective.zfar;
+				camera.zNearP = (float)x.perspective.znear;
+			}
+
+			ImportMetadata(state, entity, x.extras, true);
+		}
+		cameraIndex++;
 	}
 
 	// https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Vendor/EXT_lights_image_based/README.md
@@ -5003,6 +5011,14 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 	tinygltf::Scene scene_builder;
 
+	// A light on the same entity as a mesh or a camera is written to a child node of its own (like the import makes it): the
+	//	rotation between the glTF light pointing forward and the engine light pointing down must not turn the mesh or camera
+	auto light_child_node = [&](Entity entity) {
+		const ObjectComponent* object = wiscene.objects.GetComponent(entity);
+		return wiscene.lights.Contains(entity) &&
+			(wiscene.cameras.Contains(entity) || (object != nullptr && object->meshID != wi::ecs::INVALID_ENTITY && wiscene.meshes.Contains(object->meshID)));
+	};
+
 	// Compose Node
 	for(size_t t_id = 0; t_id < wiscene.transforms.GetCount(); ++t_id)
 	{
@@ -5010,7 +5026,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		auto transformEntity = wiscene.transforms.GetEntity(t_id);
 		auto nameComponent = wiscene.names.GetComponent(transformEntity);
 
-		auto light_forward_flip = wiscene.lights.Contains(transformEntity);
+		auto light_forward_flip = wiscene.lights.Contains(transformEntity) && !light_child_node(transformEntity);
 		if(light_forward_flip)
 			transformComponent.RotateRollPitchYaw(XMFLOAT3(-XM_PIDIV2,0,0));
 
@@ -5050,7 +5066,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			}
 		}
 
-		if(wiscene.lights.Contains(transformEntity))
+		if(light_forward_flip)
 		{
 			// tinygltf writes the node's KHR_lights_punctual extension from node.light (and removes it from the extensions without that)
 			node_builder.light = int(wiscene.lights.GetIndex(transformEntity));
@@ -5062,6 +5078,24 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		}
 		
 		state.nodeMap[transformEntity] = node_index;
+		state.gltfModel.nodes.push_back(node_builder);
+	}
+
+	// The light child nodes, after the nodes of the entities (the indices of which are the transform indices). Without a
+	//	name, the import names them after their light. They only have the rotation that the import undoes:
+	for(size_t l_id = 0; l_id < wiscene.lights.GetCount(); ++l_id)
+	{
+		Entity lightEntity = wiscene.lights.GetEntity(l_id);
+		if(!wiscene.transforms.Contains(lightEntity) || !light_child_node(lightEntity))
+			continue;
+
+		XMFLOAT4 rotation;
+		XMStoreFloat4(&rotation, XMQuaternionRotationRollPitchYaw(-XM_PIDIV2, 0, 0));
+		tinygltf::Node node_builder;
+		node_builder.rotation = { rotation.x, rotation.y, rotation.z, rotation.w };
+		node_builder.light = int(l_id);
+
+		state.gltfModel.nodes[wiscene.transforms.GetIndex(lightEntity)].children.push_back((int)state.gltfModel.nodes.size());
 		state.gltfModel.nodes.push_back(node_builder);
 	}
 
@@ -5409,7 +5443,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			{
 				exported.changes |= KEYS_MIRRORED; // without the source transform, retargeted keys are played as they are
 			}
-			if (channel.path == Path::ROTATION && wiscene.lights.Contains(channel.target))
+			if (channel.path == Path::ROTATION && wiscene.lights.Contains(channel.target) && !light_child_node(channel.target))
 			{
 				exported.changes |= KEYS_LIGHT_FLIP;
 			}
