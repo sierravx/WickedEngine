@@ -165,14 +165,28 @@ void Import_VRMC_Bone(LoaderState& state, Entity boneEntity, const std::string& 
 void Import_Mixamo_Bone(LoaderState& state, Entity boneEntity, const tinygltf::Node& node);
 void Import_Makehuman_Bone(LoaderState& state, Entity boneEntity, const tinygltf::Node& node);
 
-static void ImportMetadata(LoaderState& state, Entity entity, const tinygltf::Value& extras)
+// An entity can get the extras of more than one glTF object (a node and its light, camera or skin), they are merged into
+//	its metadata. A key has one value: a value that the entity already has for the key is replaced, unless keep_existing
+//	is set (the values of a node are kept when the extras of its light or camera are added).
+static void ImportMetadata(LoaderState& state, Entity entity, const tinygltf::Value& extras, bool keep_existing = false)
 {
 	if (extras.IsObject())
 	{
-		MetadataComponent& metadata = state.scene->metadatas.Create(entity);
+		MetadataComponent* existing = state.scene->metadatas.GetComponent(entity);
+		MetadataComponent& metadata = existing != nullptr ? *existing : state.scene->metadatas.Create(entity);
 
 		for (auto& key : extras.Keys())
 		{
+			if (metadata.bool_values.has(key) || metadata.int_values.has(key) || metadata.float_values.has(key) || metadata.string_values.has(key))
+			{
+				if (keep_existing)
+					continue;
+				// (the new value can be of an other type)
+				metadata.bool_values.erase(key);
+				metadata.int_values.erase(key);
+				metadata.float_values.erase(key);
+				metadata.string_values.erase(key);
+			}
 			auto& value = extras.Get(key);
 			switch (value.Type())
 			{
@@ -256,24 +270,36 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 		entity = scene.Entity_CreateCamera(node.name, 16, 9);
 	}
 
+	Entity light_child = INVALID_ENTITY; // the light of a node that is also a mesh or a camera
 	auto ext_lights_punctual = node.extensions.find("KHR_lights_punctual");
 	if (ext_lights_punctual != node.extensions.end())
 	{
 		// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_lights_punctual
 		int index = ext_lights_punctual->second.Get("light").Get<int>();
-		// The entity is the node, so it gets the node's name (animations, scripts and the humanoid find nodes by name),
-		//	the name of the light (which several nodes can share) is only used when the node has none:
-		std::string name = node.name;
-		if (name.empty() && index >= 0 && index < (int)state.gltfModel.lights.size())
+		std::string light_name;
+		if (index >= 0 && index < (int)state.gltfModel.lights.size())
 		{
-			name = state.gltfModel.lights[index].name;
+			light_name = state.gltfModel.lights[index].name;
 		}
-		if (name.empty())
+		if (entity == INVALID_ENTITY)
 		{
-			name = "light" + std::to_string(state.lightID++);
+			// The entity is the node, so it gets the node's name (animations, scripts and the humanoid find nodes by name),
+			//	the name of the light (which several nodes can share) is only used when the node has none:
+			std::string name = node.name.empty() ? light_name : node.name;
+			if (name.empty())
+			{
+				name = "light" + std::to_string(state.lightID++);
+			}
+			entity = scene.Entity_CreateLight(name); // light component will be filled later
+			state.punctualLightMap.insert({ index, entity });
 		}
-		entity = scene.Entity_CreateLight(name); // light component will be filled later
-		state.punctualLightMap.insert({ index, entity });
+		else
+		{
+			// The node is also a mesh or a camera, which must not get the rotation of the light below (glTF lights point
+			//	forward, engine lights down): the light is a child entity of the node, named after the light
+			light_child = scene.Entity_CreateLight(light_name.empty() ? "light" + std::to_string(state.lightID++) : light_name);
+			state.punctualLightMap.insert({ index, light_child });
+		}
 	}
 
 	if (entity == INVALID_ENTITY)
@@ -347,6 +373,11 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 	if (parent != INVALID_ENTITY)
 	{
 		scene.Component_Attach(entity, parent, true);
+	}
+
+	if (light_child != INVALID_ENTITY)
+	{
+		scene.Component_Attach(light_child, entity, true);
 	}
 
 	if (!node.children.empty())
@@ -1777,7 +1808,7 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 			transform.RotateRollPitchYaw(XMFLOAT3(XM_PIDIV2, 0, 0));
 			rotated_lights.insert(entity);
 
-			ImportMetadata(state, entity, x.extras);
+			ImportMetadata(state, entity, x.extras, true);
 		}
 		lightIndex++;
 	}
@@ -1851,7 +1882,7 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 		camera.zFarP = (float)x.perspective.zfar;
 		camera.zNearP = (float)x.perspective.znear;
 
-		ImportMetadata(state, entity, x.extras);
+		ImportMetadata(state, entity, x.extras, true);
 	}
 
 	// https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Vendor/EXT_lights_image_based/README.md

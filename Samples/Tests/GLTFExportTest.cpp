@@ -20,7 +20,8 @@
 
 // Regression test for the animation export of the editor's glTF exporter: only channels that glTF can hold are written,
 //	retargeted channels are baked, the file is valid, and the scene is restored after the export. Also the import of glTF
-//	lights: the rotation keys of light nodes, and the names of light nodes (also after an export and an import).
+//	lights: the rotation keys of light nodes, the names of light nodes, the lights of mesh and camera nodes (also after an
+//	export and an import), and the extras of a node merged with the extras of its light and camera.
 //	The exporter updates the scene, which needs a graphics device: the test runs in a child process that creates a Vulkan
 //	device (like Mesa's software lavapipe), and it is skipped if there is none.
 
@@ -330,6 +331,150 @@ namespace
 		Check(names == expected, "the names of the light nodes changed after an export and an import: " + ToString(names) + " instead of " + ToString(expected));
 	}
 
+	Entity ParentOf(const Scene& scene, Entity entity)
+	{
+		const HierarchyComponent* hierarchy = scene.hierarchy.GetComponent(entity);
+		return hierarchy != nullptr ? hierarchy->parentID : INVALID_ENTITY;
+	}
+	Entity LightChildOf(const Scene& scene, Entity parent)
+	{
+		for (size_t i = 0; i < scene.lights.GetCount(); ++i)
+		{
+			if (parent != INVALID_ENTITY && ParentOf(scene, scene.lights.GetEntity(i)) == parent)
+				return scene.lights.GetEntity(i);
+		}
+		return INVALID_ENTITY;
+	}
+	std::string NameOf(const Scene& scene, Entity entity)
+	{
+		const NameComponent* name = scene.names.GetComponent(entity);
+		return name != nullptr ? name->name : std::string();
+	}
+
+	// Import: the light of a node that is also a mesh or a camera is a child entity of the node (which keeps the mesh or
+	//	camera, in the hierarchy and without the rotation of the light), and the extras of a node are merged with the extras
+	//	of its light and camera (the node's values are kept).
+	void CheckLightNodeComponents()
+	{
+		const float positions[9] = { 0, 0, 0, 1, 0, 0, 0, 1, 0 }; // a triangle
+		static_assert(sizeof(positions) == 36, "the byteLength and buffer view in the file below");
+		const char* components_file = "GLTFImportTest_light_components.gltf";
+		const char* components_bin = "GLTFImportTest_light_components.bin"; // the uri in the file below
+		bool written = false;
+		if (FILE* bin = fopen(components_bin, "wb"))
+		{
+			written = fwrite(positions, sizeof(positions), 1, bin) == 1;
+			written &= fclose(bin) == 0;
+		}
+		if (FILE* gltf = fopen(components_file, "w"))
+		{
+			written &= fputs(R"({
+	"asset": { "version": "2.0" },
+	"extensionsUsed": [ "KHR_lights_punctual" ],
+	"extensions": { "KHR_lights_punctual": { "lights": [
+		{ "type": "point", "name": "MeshLight" },
+		{ "type": "spot", "name": "CameraLight", "spot": {}, "extras": { "light_value": 2 } },
+		{ "type": "point", "name": "ExtrasLight", "extras": { "light_value": 2, "shared_value": "light" } }
+	] } },
+	"scene": 0,
+	"scenes": [ { "nodes": [ 0, 1, 2 ] } ],
+	"nodes": [
+		{ "name": "LampMesh", "mesh": 0, "translation": [ 1, 2, 3 ], "extensions": { "KHR_lights_punctual": { "light": 0 } } },
+		{
+			"name": "LampCamera", "camera": 0, "translation": [ 4, 5, 6 ], "extras": { "node_value": 1, "shared_value": "node" },
+			"extensions": { "KHR_lights_punctual": { "light": 1 } }
+		},
+		{ "name": "LampNode", "extras": { "node_value": 1, "shared_value": "node" }, "extensions": { "KHR_lights_punctual": { "light": 2 } } }
+	],
+	"cameras": [ { "type": "perspective", "perspective": { "yfov": 1, "znear": 0.1 }, "extras": { "camera_value": 3, "shared_value": "camera" } } ],
+	"meshes": [ { "name": "LampMeshData", "primitives": [ { "attributes": { "POSITION": 0 } } ] } ],
+	"buffers": [ { "byteLength": 36, "uri": "GLTFImportTest_light_components.bin" } ],
+	"bufferViews": [ { "buffer": 0, "byteOffset": 0, "byteLength": 36 } ],
+	"accessors": [ { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [ 0, 0, 0 ], "max": [ 1, 1, 0 ] } ]
+})", gltf) >= 0;
+			written &= fclose(gltf) == 0;
+		}
+		else
+		{
+			written = false;
+		}
+		Check(written, "the glTF file of the light component test could not be written");
+		if (!written)
+		{
+			std::remove(components_file);
+			std::remove(components_bin);
+			return;
+		}
+
+		Scene scene;
+		ImportModel_GLTF(components_file, scene);
+		std::remove(components_file);
+		std::remove(components_bin);
+
+		// The mesh, the camera and the light nodes, each in the hierarchy of the model, with a light child for the mesh and the camera
+		auto check_nodes = [&](Scene& imported, const std::string& when) {
+			const Entity lamp_mesh = imported.Entity_FindByName("LampMesh");
+			const Entity lamp_camera = imported.Entity_FindByName("LampCamera");
+			const Entity lamp_node = imported.Entity_FindByName("LampNode");
+			Check(imported.objects.GetCount() == 1 && imported.objects.Contains(lamp_mesh) && !imported.lights.Contains(lamp_mesh) && ParentOf(imported, lamp_mesh) != INVALID_ENTITY,
+				"the node with a mesh and a light did not import as the object in the hierarchy " + when);
+			Check(imported.cameras.GetCount() == 1 && imported.cameras.Contains(lamp_camera) && !imported.lights.Contains(lamp_camera) && ParentOf(imported, lamp_camera) != INVALID_ENTITY,
+				"the node with a camera and a light did not import as the camera in the hierarchy " + when);
+			Check(imported.lights.GetCount() == 3 && imported.lights.Contains(lamp_node) && ParentOf(imported, lamp_node) != INVALID_ENTITY, "the light node did not import as a light " + when);
+
+			const Entity mesh_light = LightChildOf(imported, lamp_mesh);
+			const Entity camera_light = LightChildOf(imported, lamp_camera);
+			Check(NameOf(imported, mesh_light) == "MeshLight" && imported.lights.GetComponent(mesh_light)->GetType() == LightComponent::POINT,
+				"the light of the node with a mesh is not a child of the object " + when);
+			Check(NameOf(imported, camera_light) == "CameraLight" && imported.lights.GetComponent(camera_light)->GetType() == LightComponent::SPOT,
+				"the light of the node with a camera is not a child of the camera " + when);
+			if (!imported.transforms.Contains(lamp_mesh) || !imported.transforms.Contains(lamp_camera) || !imported.transforms.Contains(lamp_node) ||
+				!imported.transforms.Contains(mesh_light) || !imported.transforms.Contains(camera_light))
+				return;
+
+			// The node keeps its transform (in the engine space), its light child gets the rotation of a light node:
+			const XMVECTOR identity = XMQuaternionIdentity();
+			const TransformComponent& mesh_transform = *imported.transforms.GetComponent(lamp_mesh);
+			const TransformComponent& camera_transform = *imported.transforms.GetComponent(lamp_camera);
+			Check(SameRotation(XMLoadFloat4(&mesh_transform.rotation_local), identity) && SameRotation(XMLoadFloat4(&camera_transform.rotation_local), identity),
+				"the node with a mesh or a camera got the rotation of its light " + when);
+			Check(Near({ mesh_transform.translation_local.x, mesh_transform.translation_local.y, mesh_transform.translation_local.z }, { 1, 2, -3 }) &&
+				Near({ camera_transform.translation_local.x, camera_transform.translation_local.y, camera_transform.translation_local.z }, { 4, 5, -6 }),
+				"the node with a mesh or a camera did not keep its translation " + when);
+			const XMVECTOR light_rotation = XMLoadFloat4(&imported.transforms.GetComponent(lamp_node)->rotation_local);
+			for (Entity light : { mesh_light, camera_light })
+			{
+				const TransformComponent& transform = *imported.transforms.GetComponent(light);
+				Check(SameRotation(XMLoadFloat4(&transform.rotation_local), light_rotation) &&
+					Near({ transform.translation_local.x, transform.translation_local.y, transform.translation_local.z }, { 0, 0, 0 }),
+					"the light child of a node is not placed like a light node " + when);
+			}
+		};
+		check_nodes(scene, "after the import");
+
+		// The extras of the nodes and of their light and camera are merged, the node's values are kept:
+		Check(scene.metadatas.GetCount() == 3, "an entity got more than one metadata component");
+		auto check_metadata = [&](const std::string& name, const std::string& definition_key, int definition_value) {
+			const MetadataComponent* metadata = scene.metadatas.GetComponent(scene.Entity_FindByName(name));
+			Check(metadata != nullptr && metadata->int_values.get("node_value") == 1 && metadata->int_values.get(definition_key) == definition_value &&
+				metadata->string_values.get("shared_value") == "node" && metadata->int_values.size() == 2 && metadata->string_values.size() == 1,
+				"the extras of the node " + name + " and of its " + definition_key + " were not merged");
+		};
+		check_metadata("LampCamera", "camera_value", 3);
+		check_metadata("LampNode", "light_value", 2);
+		const MetadataComponent* light_metadata = scene.metadatas.GetComponent(scene.Entity_FindByName("CameraLight"));
+		Check(light_metadata != nullptr && light_metadata->int_values.get("light_value") == 2 && light_metadata->int_values.size() == 1,
+			"the extras of the light of a node with a camera did not go to the light child");
+
+		// Export and import back:
+		RemoveOutputFiles();
+		ExportModel_GLTF(output_file, scene);
+		Scene reimported;
+		ImportModel_GLTF(output_file, reimported);
+		RemoveOutputFiles();
+		check_nodes(reimported, "after an export and an import");
+	}
+
 	int RunExport(int device_created_pipe)
 	{
 		wi::jobsystem::Initialize();
@@ -341,6 +486,7 @@ namespace
 
 		CheckSharedSamplerImport();
 		CheckLightNodeNames();
+		CheckLightNodeComponents();
 
 		RemoveOutputFiles(); // the files of an earlier run must not be checked
 
