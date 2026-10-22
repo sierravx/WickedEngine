@@ -148,7 +148,7 @@ struct LoaderState
 	tinygltf::Model gltfModel;
 	Scene* scene;
 	wi::unordered_map<int, Entity> entityMap;  // node -> entity
-	std::unordered_multimap<int, Entity> punctualLightMap;  // KHR_lights_punctual -> entities
+	std::unordered_multimap<int, Entity> punctualLightMap;  // KHR_lights_punctual -> light entities (children of the nodes)
 	Entity rootEntity = INVALID_ENTITY;
 
 	//Export states
@@ -196,6 +196,10 @@ static void ImportMetadata(LoaderState& state, Entity entity, const tinygltf::Va
 	}
 
 }
+
+// In gltf, default light direction is forward, in engine, it's downwards. The light of a node is imported on a child
+//	with this rotation (roll, pitch, yaw in the glTF space), the exporter writes such a child as the light of its parent's node:
+static const XMFLOAT3 GLTF_LIGHT_ROTATION = XMFLOAT3(XM_PIDIV2, 0, 0);
 
 // Recursively loads nodes and resolves hierarchy:
 void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
@@ -253,15 +257,6 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 		}
 
 		entity = scene.Entity_CreateCamera(node.name, 16, 9);
-	}
-
-	auto ext_lights_punctual = node.extensions.find("KHR_lights_punctual");
-	if (ext_lights_punctual != node.extensions.end())
-	{
-		// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_lights_punctual
-		entity = scene.Entity_CreateLight(""); // light component will be filled later
-		int index = ext_lights_punctual->second.Get("light").Get<int>();
-		state.punctualLightMap.insert({ index, entity });
 	}
 
 	if (entity == INVALID_ENTITY)
@@ -335,6 +330,19 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 	if (parent != INVALID_ENTITY)
 	{
 		scene.Component_Attach(entity, parent, true);
+	}
+
+	auto ext_lights_punctual = node.extensions.find("KHR_lights_punctual");
+	if (ext_lights_punctual != node.extensions.end())
+	{
+		// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_lights_punctual
+		//	The light is put on a child with the fixed light rotation, so the node keeps its transform, animation, children,
+		//	mesh or camera as they are (the exporter writes such a child as the light of the node):
+		Entity lightEntity = scene.Entity_CreateLight(""); // light component will be filled later
+		scene.transforms.GetComponent(lightEntity)->RotateRollPitchYaw(GLTF_LIGHT_ROTATION);
+		scene.Component_Attach(lightEntity, entity, true);
+		int index = ext_lights_punctual->second.Get("light").Get<int>();
+		state.punctualLightMap.insert({ index, lightEntity });
 	}
 
 	if (!node.children.empty())
@@ -1727,7 +1735,6 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 	}
 
 	// Create lights:
-	wi::unordered_set<Entity> rotated_lights; // the light nodes that get the rotation below
 	int lightIndex = 0;
 	for (auto& x : state.gltfModel.lights)
 	{
@@ -1762,66 +1769,9 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 			light.innerConeAngle = float(x.spot.innerConeAngle);
 			light.SetCastShadow(true);
 
-			// In gltf, default light direction is forward, in engine, it's downwards, so apply a rotation:
-			TransformComponent& transform = *scene.transforms.GetComponent(entity);
-			transform.RotateRollPitchYaw(XMFLOAT3(XM_PIDIV2, 0, 0));
-			rotated_lights.insert(entity);
-
 			ImportMetadata(state, entity, x.extras);
 		}
 		lightIndex++;
-	}
-
-	// The rotation keys of light nodes get the same rotation as the lights above (the exporter undoes it). It is a constant
-	//	rotation multiplied with every key, which also applies to the tangents of cubic spline keys. Data that other channels
-	//	use too gets a copy for the light channels first.
-	if (!rotated_lights.empty())
-	{
-		const XMVECTOR light_rotation = XMQuaternionRotationRollPitchYaw(XM_PIDIV2, 0, 0);
-		auto light_rotation_channel = [&](const AnimationComponent::AnimationChannel& channel) {
-			return channel.path == AnimationComponent::AnimationChannel::Path::ROTATION && rotated_lights.count(channel.target) > 0;
-		};
-		wi::unordered_map<Entity, uint32_t> data_users; // data -> 1: light rotation channels use it, 2: other channels use it
-		for (size_t i = 0; i < scene.animations.GetCount(); ++i)
-		{
-			const AnimationComponent& animation = scene.animations[i];
-			for (const AnimationComponent::AnimationChannel& channel : animation.channels)
-			{
-				if (channel.samplerIndex >= 0 && channel.samplerIndex < (int)animation.samplers.size())
-				{
-					data_users[animation.samplers[channel.samplerIndex].data] |= light_rotation_channel(channel) ? 1u : 2u;
-				}
-			}
-		}
-		wi::unordered_set<Entity> rotated_datas;
-		for (size_t i = 0; i < scene.animations.GetCount(); ++i)
-		{
-			AnimationComponent& animation = scene.animations[i];
-			wi::unordered_map<int, int> copied_samplers; // sampler index -> sampler of the copied data
-			for (AnimationComponent::AnimationChannel& channel : animation.channels)
-			{
-				if (!light_rotation_channel(channel) || channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
-					continue;
-				const Entity dataEntity = animation.samplers[channel.samplerIndex].data;
-				if (!scene.animation_datas.Contains(dataEntity))
-					continue;
-				if ((data_users[dataEntity] & 2u) != 0)
-				{
-					auto copied = copied_samplers.find(channel.samplerIndex);
-					if (copied == copied_samplers.end())
-					{
-						copied = copied_samplers.insert({ channel.samplerIndex, CopySamplerData(scene, scene.animations.GetEntity(i), animation, channel.samplerIndex) }).first;
-					}
-					channel.samplerIndex = copied->second;
-				}
-
-				const Entity rotatedEntity = animation.samplers[channel.samplerIndex].data;
-				if (rotated_datas.insert(rotatedEntity).second)
-				{
-					RotateRotationKeys(light_rotation, scene.animation_datas.GetComponent(rotatedEntity)->keyframe_data);
-				}
-			}
-		}
 	}
 
 	int cameraIndex = 0;
@@ -4962,6 +4912,71 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 	tinygltf::Scene scene_builder;
 
+	// glTF lights point forward and engine lights down (see GLTF_LIGHT_ROTATION), so lights are written in one of three ways:
+	//	- A light on a child with only the light rotation, as the import makes it (see LoadNode()), is written as the light of
+	//	  its parent's node, without a node of its own, if nothing else needs that node.
+	//	- A light with nothing else on its node is written on its node, with the light rotation undone in the node's rotation
+	//	  (and in its rotation keys).
+	//	- A light with more on its node, which that rotation would turn (children, a mesh, a camera, a joint of a skin), is
+	//	  written on a child node that has only the light rotation undone, and its node is written as it is.
+	const XMVECTOR light_rotation = XMQuaternionRotationRollPitchYaw(GLTF_LIGHT_ROTATION.x, GLTF_LIGHT_ROTATION.y, GLTF_LIGHT_ROTATION.z);
+	wi::unordered_map<Entity, Entity> node_lights; // parent -> light child written on the parent's node
+	wi::unordered_set<Entity> node_light_children;
+	wi::unordered_set<Entity> flipped_lights; // lights written on their node with the light rotation undone
+	wi::vector<std::pair<int, int>> light_child_nodes; // node -> child node written with the light of the node's entity
+	{
+		using Path = AnimationComponent::AnimationChannel::Path;
+		wi::unordered_set<Entity> parents; // entities with children that are written as nodes
+		for (size_t i = 0; i < wiscene.hierarchy.GetCount(); ++i)
+		{
+			if (wiscene.transforms.Contains(wiscene.hierarchy.GetEntity(i)))
+			{
+				parents.insert(wiscene.hierarchy[i].parentID);
+			}
+		}
+		wi::unordered_set<Entity> bones;
+		for (size_t i = 0; i < wiscene.armatures.GetCount(); ++i)
+		{
+			bones.insert(wiscene.armatures[i].boneCollection.begin(), wiscene.armatures[i].boneCollection.end());
+		}
+		wi::unordered_set<Entity> animated; // targets of transform animation
+		for (size_t i = 0; i < wiscene.animations.GetCount(); ++i)
+		{
+			for (const AnimationComponent::AnimationChannel& channel : wiscene.animations[i].channels)
+			{
+				if (channel.path == Path::TRANSLATION || channel.path == Path::ROTATION || channel.path == Path::SCALE)
+				{
+					animated.insert(channel.target);
+				}
+			}
+		}
+		const XMVECTOR epsilon = XMVectorReplicate(0.00001f);
+		for (size_t l_id = 0; l_id < wiscene.lights.GetCount(); ++l_id)
+		{
+			const Entity lightEntity = wiscene.lights.GetEntity(l_id);
+			const TransformComponent* transform = wiscene.transforms.GetComponent(lightEntity);
+			if (transform == nullptr || parents.count(lightEntity) > 0 || bones.count(lightEntity) > 0 || wiscene.objects.Contains(lightEntity) ||
+				wiscene.cameras.Contains(lightEntity) || wiscene.armatures.Contains(lightEntity))
+				continue; // no node, or more on its node: the light is written on a child of the node
+			const HierarchyComponent* hierarchy = wiscene.hierarchy.GetComponent(lightEntity);
+			const Entity parent = hierarchy == nullptr ? INVALID_ENTITY : hierarchy->parentID;
+			const XMVECTOR rotation = XMLoadFloat4(&transform->rotation_local);
+			// (the parent's node must not have a light already)
+			if (animated.count(lightEntity) == 0 && wiscene.transforms.Contains(parent) && !wiscene.lights.Contains(parent) && node_lights.count(parent) == 0 &&
+				XMVector3NearEqual(XMLoadFloat3(&transform->translation_local), XMVectorZero(), epsilon) &&
+				XMVector3NearEqual(XMLoadFloat3(&transform->scale_local), XMVectorSplatOne(), epsilon) &&
+				(XMVector4NearEqual(rotation, light_rotation, epsilon) || XMVector4NearEqual(rotation, -light_rotation, epsilon)))
+			{
+				node_lights[parent] = lightEntity;
+				node_light_children.insert(lightEntity);
+			}
+			else
+			{
+				flipped_lights.insert(lightEntity);
+			}
+		}
+	}
+
 	// Compose Node
 	for(size_t t_id = 0; t_id < wiscene.transforms.GetCount(); ++t_id)
 	{
@@ -4969,15 +4984,18 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		auto transformEntity = wiscene.transforms.GetEntity(t_id);
 		auto nameComponent = wiscene.names.GetComponent(transformEntity);
 
-		auto light_forward_flip = wiscene.lights.Contains(transformEntity);
+		if (node_light_children.count(transformEntity) > 0)
+			continue; // written as the light of the parent's node
+
+		auto light_forward_flip = flipped_lights.count(transformEntity) > 0;
 		if(light_forward_flip)
 			transformComponent.RotateRollPitchYaw(XMFLOAT3(-XM_PIDIV2,0,0));
 
 		auto objectComponent = wiscene.objects.GetComponent(transformEntity);
 
 		tinygltf::Node node_builder;
-		int node_index = (int)t_id;
-		
+		int node_index = (int)state.gltfModel.nodes.size();
+
 		if(nameComponent != nullptr)
 			node_builder.name = nameComponent->name;
 
@@ -5009,10 +5027,14 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			}
 		}
 
-		if(wiscene.lights.Contains(transformEntity))
+		// tinygltf writes the node's KHR_lights_punctual extension from node.light (and removes it from the extensions without that)
+		if(light_forward_flip)
 		{
-			// tinygltf writes the node's KHR_lights_punctual extension from node.light (and removes it from the extensions without that)
 			node_builder.light = int(wiscene.lights.GetIndex(transformEntity));
+		}
+		else if(auto node_light = node_lights.find(transformEntity); node_light != node_lights.end())
+		{
+			node_builder.light = int(wiscene.lights.GetIndex(node_light->second));
 		}
 
 		if(wiscene.cameras.Contains(transformEntity))
@@ -5022,6 +5044,19 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		
 		state.nodeMap[transformEntity] = node_index;
 		state.gltfModel.nodes.push_back(node_builder);
+
+		if(wiscene.lights.Contains(transformEntity) && !light_forward_flip)
+		{
+			// The light rotation would turn the rest of the node, the light is written on a child node with only that rotation undone:
+			tinygltf::Node light_builder;
+			light_builder.name = node_builder.name;
+			XMFLOAT4 rotation;
+			XMStoreFloat4(&rotation, XMQuaternionInverse(light_rotation));
+			light_builder.rotation = { rotation.x, rotation.y, rotation.z, rotation.w };
+			light_builder.light = int(wiscene.lights.GetIndex(transformEntity));
+			light_child_nodes.emplace_back(node_index, (int)state.gltfModel.nodes.size());
+			state.gltfModel.nodes.push_back(light_builder);
+		}
 	}
 
 	// Write Armature
@@ -5225,7 +5260,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			}
 		};
 
-		// Light nodes are written with a forward flip in their rotation (see the nodes above), their rotation keys get it too:
+		// Light nodes written with a forward flip in their rotation (see the nodes above) get it in their rotation keys too:
 		const XMVECTOR light_forward_flip = XMQuaternionRotationRollPitchYaw(-XM_PIDIV2, 0, 0);
 
 		// The keys of a channel are written as they are, or with these changes. The same data with the same changes shares accessors:
@@ -5368,7 +5403,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			{
 				exported.changes |= KEYS_MIRRORED; // without the source transform, retargeted keys are played as they are
 			}
-			if (channel.path == Path::ROTATION && wiscene.lights.Contains(channel.target))
+			if (channel.path == Path::ROTATION && flipped_lights.count(channel.target) > 0)
 			{
 				exported.changes |= KEYS_LIGHT_FLIP;
 			}
@@ -5478,19 +5513,25 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 	{
 		auto& hierarchyComponent = wiscene.hierarchy[h_id];
 		auto hierarchyEntity = wiscene.hierarchy.GetEntity(h_id);
-		if(wiscene.transforms.Contains(hierarchyComponent.parentID) && wiscene.transforms.Contains(hierarchyEntity))
+		auto node = state.nodeMap.find(hierarchyEntity);
+		auto parent_node = state.nodeMap.find(hierarchyComponent.parentID);
+		if(wiscene.transforms.Contains(hierarchyComponent.parentID) && wiscene.transforms.Contains(hierarchyEntity) &&
+			node != state.nodeMap.end() && parent_node != state.nodeMap.end())
 		{
-			int node_index = (int)wiscene.transforms.GetIndex(hierarchyEntity);
-			size_t parent_node_index = wiscene.transforms.GetIndex(hierarchyComponent.parentID);
-			state.gltfModel.nodes[parent_node_index].children.push_back(node_index);
+			int node_index = node->second;
+			state.gltfModel.nodes[parent_node->second].children.push_back(node_index);
 			child_node_indices.insert(node_index);
 		}
 	}
+	for(auto [node_index, light_node_index] : light_child_nodes)
+	{
+		state.gltfModel.nodes[node_index].children.push_back(light_node_index);
+		child_node_indices.insert(light_node_index);
+	}
 
 	// Scene root must only contain top-level nodes
-	for (size_t t_id = 0; t_id < wiscene.transforms.GetCount(); ++t_id)
+	for (int node_index = 0; node_index < (int)state.gltfModel.nodes.size(); ++node_index)
 	{
-		int node_index = (int)t_id;
 		if (child_node_indices.find(node_index) == child_node_indices.end())
 		{
 			scene_builder.nodes.push_back(node_index);

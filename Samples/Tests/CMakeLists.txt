@@ -71,7 +71,7 @@ if (UNIX AND NOT APPLE)
 	add_test(NAME GraphicsDeviceFatalErrorTest COMMAND GraphicsDeviceFatalErrorTest)
 	set_target_properties(GraphicsDeviceFatalErrorTest PROPERTIES FOLDER "Tests")
 
-	# The editor's glTF exporter, it needs a Vulkan device (like Mesa's lavapipe) and is skipped without one
+	# The editor's glTF importer and exporter, it needs a Vulkan device (like Mesa's lavapipe) and is skipped without one
 	add_executable(GLTFExportTest
 		GLTFExportTest.cpp
 		${CMAKE_CURRENT_SOURCE_DIR}/../../Editor/ModelImporter_GLTF.cpp
