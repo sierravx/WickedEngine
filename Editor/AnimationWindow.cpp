@@ -55,12 +55,53 @@ void AnimationWindow::Create(EditorComponent* _editor)
 
 				if (sampler.mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE)
 				{
-					const AnimationDataComponent* animationdata = editor->GetCurrentScene().animation_datas.GetComponent(sampler.data);
-					if (animationdata == nullptr)
+					const Scene& scene = editor->GetCurrentScene();
+
+					// Number of float components of one value, depending on what the channel animates:
+					size_t components = 0;
+					switch (channel.GetPathDataType())
+					{
+					case AnimationComponent::AnimationChannel::PathDataType::Float:
+						components = 1;
+						break;
+					case AnimationComponent::AnimationChannel::PathDataType::Float2:
+						components = 2;
+						break;
+					case AnimationComponent::AnimationChannel::PathDataType::Float3:
+						components = 3;
+						break;
+					case AnimationComponent::AnimationChannel::PathDataType::Float4:
+						components = 4;
+						break;
+					case AnimationComponent::AnimationChannel::PathDataType::Weights:
+					{
+						const MeshComponent* mesh = scene.meshes.GetComponent(channel.target);
+						if (mesh == nullptr)
+						{
+							// Also try going through object's mesh reference:
+							const ObjectComponent* object = scene.objects.GetComponent(channel.target);
+							if (object != nullptr)
+							{
+								mesh = scene.meshes.GetComponent(object->meshID);
+							}
+						}
+						if (mesh != nullptr)
+						{
+							components = mesh->morph_targets.size();
+						}
+					}
+					break;
+					default:
+						break;
+					}
+
+					// Cubic spline data contains in-tangent, value and out-tangent for every keyframe:
+					const AnimationDataComponent* animationdata = scene.animation_datas.GetComponent(sampler.data);
+					if (animationdata == nullptr || components == 0)
 					{
 						sampler.mode = AnimationComponent::AnimationSampler::Mode::LINEAR;
 					}
-					else if (animationdata->keyframe_data.size() != animationdata->keyframe_times.size() * 3 * 3)
+					else if (animationdata->keyframe_data.size() != animationdata->keyframe_times.size() * components * 3)
 					{
 						sampler.mode = AnimationComponent::AnimationSampler::Mode::LINEAR;
 					}
