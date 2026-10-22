@@ -5130,12 +5130,10 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		};
 
 		// A channel retargeted without baking is evaluated from the keys of the source animation at runtime, as
-		//	dstRelativeMatrix * source local transform * srcRelativeParentMatrix (see Scene::RunAnimationUpdateSystem()),
+		//	dstRelativeMatrix * source local transform * srcRelativeParentMatrix (see AnimationComponent::RetargetSourceData::RetargetValue()),
 		//	it is baked the same way. The tangents of cubic spline keys are derivatives, they are carried through the
 		//	derivative of the retargeting.
 		auto bake_retarget = [](const AnimationComponent::RetargetSourceData& retarget, const TransformComponent& source, Path path, bool cubic, wi::vector<float>& values) {
-			const XMMATRIX dstRelativeMatrix = XMLoadFloat4x4(&retarget.dstRelativeMatrix);
-			const XMMATRIX srcRelativeParentMatrix = XMLoadFloat4x4(&retarget.srcRelativeParentMatrix);
 			const size_t components = path == Path::ROTATION ? 4 : 3;
 			auto load = [&](size_t offset) {
 				return path == Path::ROTATION ? XMLoadFloat4((const XMFLOAT4*)&values[offset]) : XMLoadFloat3((const XMFLOAT3*)&values[offset]);
@@ -5151,22 +5149,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				}
 			};
 			auto retargeted = [&](XMVECTOR V) {
-				TransformComponent transform = source;
-				if (path == Path::TRANSLATION)
-				{
-					XMStoreFloat3(&transform.translation_local, V);
-				}
-				else if (path == Path::ROTATION)
-				{
-					XMStoreFloat4(&transform.rotation_local, V);
-				}
-				else
-				{
-					XMStoreFloat3(&transform.scale_local, V);
-				}
-				XMVECTOR S, R, T;
-				wi::math::DecomposeTransform(&S, &R, &T, dstRelativeMatrix * transform.GetLocalMatrix() * srcRelativeParentMatrix);
-				return path == Path::TRANSLATION ? T : (path == Path::ROTATION ? R : S);
+				return retarget.RetargetValue(source, path, V);
 			};
 			// The derivative of the retargeting at value (retargeted to result), in the direction of tangent:
 			auto retargeted_tangent = [&](XMVECTOR value, XMVECTOR result, XMVECTOR tangent) {

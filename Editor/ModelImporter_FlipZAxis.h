@@ -143,7 +143,7 @@ inline void FlipZAxisTransforms(wi::scene::Scene& scene, wi::ecs::Entity rootEnt
 
 	using Path = wi::scene::AnimationComponent::AnimationChannel::Path;
 
-	// Retargeted channels are evaluated as dstRelativeMatrix * source local transform * srcRelativeParentMatrix (see Scene::RunAnimationUpdateSystem()).
+	// Retargeted channels are evaluated as dstRelativeMatrix * source local transform * srcRelativeParentMatrix (see AnimationComponent::RetargetSourceData::RetargetValue()).
 	//	With the source in this scene, its local transform and keys are mirrored too, so the matrices are mirrored like the others (F * M * F).
 	//	With the source in an other scene, which is not mirrored here, the result is mirrored by F * dstRelativeMatrix and srcRelativeParentMatrix * F.
 	//	A retarget used by channels with sources in both kinds of scenes (Scene::RetargetAnimation() doesn't make such) is copied

@@ -62,6 +62,13 @@ target_link_libraries(FlipZAxisTransformsTest PRIVATE WickedEngine)
 add_test(NAME FlipZAxisTransformsTest COMMAND FlipZAxisTransformsTest)
 set_target_properties(FlipZAxisTransformsTest PROPERTIES FOLDER "Tests")
 
+add_executable(AnimationRetargetTest
+	AnimationRetargetTest.cpp
+)
+target_link_libraries(AnimationRetargetTest PRIVATE WickedEngine)
+add_test(NAME AnimationRetargetTest COMMAND AnimationRetargetTest)
+set_target_properties(AnimationRetargetTest PROPERTIES FOLDER "Tests")
+
 # Linux only: elsewhere the error message box of the failed device creation is modal
 if (UNIX AND NOT APPLE)
 	add_executable(GraphicsDeviceFatalErrorTest

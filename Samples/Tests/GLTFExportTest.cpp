@@ -101,7 +101,7 @@ namespace
 		return entity;
 	}
 
-	// What the runtime evaluates for a translation key of a retargeted channel (see Scene::RunAnimationUpdateSystem())
+	// What the runtime evaluates for a translation key of a retargeted channel (see AnimationComponent::RetargetSourceData::RetargetValue())
 	XMVECTOR RetargetTranslation(const TransformComponent& source, const XMFLOAT4X4& dst, const XMFLOAT4X4& src, XMVECTOR key)
 	{
 		TransformComponent transform = source;
