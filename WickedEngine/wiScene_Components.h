@@ -1836,6 +1836,13 @@ namespace wi::scene
 			//	and the same part is decomposed from that with wi::math::DecomposeTransform(). Values of other paths are returned unchanged.
 			//	source is the transform of the source entity, in the scene that holds it (the scene of the animation data).
 			XMVECTOR RetargetValue(const TransformComponent& source, AnimationChannel::Path path, const XMVECTOR& value) const;
+
+			// Bakes the keys of a translation, rotation or scale channel retargeted from the source, so that they play the same as
+			//	the source keys retargeted while playing (with RetargetValue()). source is the transform of the source entity, other
+			//	paths are left unchanged.
+			//	cubic: the keys are cubic spline keys (in-tangent, value, out-tangent), the tangents are carried through the derivative
+			//	of the retargeting, and rotation keys keep the hemisphere relation of the source keys (otherwise they go the short way).
+			void BakeKeyframes(const TransformComponent& source, AnimationChannel::Path path, bool cubic, wi::vector<float>& keyframe_data) const;
 		};
 
 		wi::vector<AnimationChannel> channels;
