@@ -9,6 +9,7 @@
 #include <wiHelper.h>
 #include <wiUnorderedSet.h>
 
+#include <cmath>
 #include <map>
 #include <tuple>
 
@@ -1635,6 +1636,7 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 			}
 			else if (!sam.interpolation.compare("STEP"))
 			{
+				// (both hold the value of a key until the time of the next key)
 				animationcomponent.samplers[i].mode = AnimationComponent::AnimationSampler::Mode::STEP;
 			}
 			else if (!sam.interpolation.compare("CUBICSPLINE"))
@@ -5225,21 +5227,69 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			return accessor_index;
 		};
 
+		// The keys of a NEAREST sampler change halfway between their times, they are written as glTF STEP keys at those times
+		//	(the first key keeps its time, and the last key is repeated at its time, which keeps the end of the animation).
+		//	Keys that are not after the previous key are left out (of keys at the same time, the runtime takes the first).
+		auto nearest_keys = [](const wi::vector<float>& times) {
+			wi::vector<size_t> keys;
+			for (size_t i = 0; i < times.size(); ++i)
+			{
+				if (keys.empty() || times[i] > times[keys.back()])
+				{
+					keys.push_back(i);
+				}
+			}
+			return keys;
+		};
+		auto nearest_as_step_times = [&](const wi::vector<float>& times) {
+			const wi::vector<size_t> keys = nearest_keys(times);
+			wi::vector<float> result = { times[keys.front()] };
+			for (size_t i = 1; i < keys.size(); ++i)
+			{
+				// NEAREST keeps the earlier key at the halfway time, and glTF STEP switches at the time of its key, so the key is
+				//	written at the next time after halfway (if there is one before the later key):
+				const float halfway = (times[keys[i - 1]] + times[keys[i]]) * 0.5f;
+				const float after_halfway = std::nextafter(halfway, times[keys[i]]);
+				result.push_back(after_halfway < times[keys[i]] ? after_halfway : halfway);
+			}
+			if (keys.size() > 1)
+			{
+				result.push_back(times[keys.back()]);
+			}
+			return result;
+		};
+		auto nearest_as_step_values = [&](const wi::vector<float>& times, const wi::vector<float>& values) {
+			const wi::vector<size_t> keys = nearest_keys(times);
+			const size_t key_size = values.size() / times.size(); // (the weights of all morph targets are one key)
+			wi::vector<float> result;
+			for (size_t key : keys)
+			{
+				result.insert(result.end(), values.begin() + key * key_size, values.begin() + (key + 1) * key_size);
+			}
+			if (keys.size() > 1)
+			{
+				result.insert(result.end(), values.begin() + keys.back() * key_size, values.begin() + (keys.back() + 1) * key_size);
+			}
+			return result;
+		};
+
 		// The keys of a channel are written as they are, or with these changes. The same data with the same changes shares accessors:
 		enum KeyChanges : uint32_t
 		{
 			KEYS_AS_THEY_ARE = 0,
 			KEYS_MIRRORED = 1 << 0, // keys of an other scene, which is not mirrored to the glTF space with this scene
 			KEYS_LIGHT_FLIP = 1 << 1, // rotation keys of a light node
+			KEYS_NEAREST_AS_STEP = 1 << 2, // keys of a NEAREST sampler, the times change too
 		};
 		// (the scenes are keyed by address, as integers to be ordered in a std::map)
-		std::map<std::pair<uintptr_t, Entity>, int> input_accessors; // data -> keyframe times
+		std::map<std::tuple<uintptr_t, Entity, bool>, int> input_accessors; // data and NEAREST as STEP -> keyframe times
 		std::map<std::tuple<uintptr_t, Entity, Path, uint32_t>, int> output_accessors; // data, path and changes -> keyframe values
-		auto get_input_accessor = [&](const Scene* data_scene, Entity dataEntity, const AnimationDataComponent& data) {
-			auto [it, inserted] = input_accessors.try_emplace(std::make_pair(uintptr_t(data_scene), dataEntity), -1);
+		auto get_input_accessor = [&](const Scene* data_scene, Entity dataEntity, const AnimationDataComponent& data, uint32_t changes) {
+			const bool nearest_as_step = (changes & KEYS_NEAREST_AS_STEP) != 0;
+			auto [it, inserted] = input_accessors.try_emplace(std::make_tuple(uintptr_t(data_scene), dataEntity, nearest_as_step), -1);
 			if (inserted)
 			{
-				it->second = write_accessor(data.keyframe_times, TINYGLTF_TYPE_SCALAR);
+				it->second = write_accessor(nearest_as_step ? nearest_as_step_times(data.keyframe_times) : data.keyframe_times, TINYGLTF_TYPE_SCALAR);
 			}
 			return it->second;
 		};
@@ -5263,6 +5313,10 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				{
 					RotateRotationKeys(light_forward_flip, values);
 				}
+				if (changes & KEYS_NEAREST_AS_STEP)
+				{
+					values = nearest_as_step_values(data.keyframe_times, values);
+				}
 				it->second = write_accessor(values, type);
 			}
 			return it->second;
@@ -5271,7 +5325,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		auto interpolation = [](AnimationComponent::AnimationSampler::Mode mode) {
 			return
 				(mode == AnimationComponent::AnimationSampler::Mode::CUBICSPLINE) ? "CUBICSPLINE" :
-				(mode == AnimationComponent::AnimationSampler::Mode::STEP) ? "STEP" : "LINEAR";
+				(mode == AnimationComponent::AnimationSampler::Mode::STEP || mode == AnimationComponent::AnimationSampler::Mode::NEAREST) ? "STEP" : "LINEAR";
 		};
 
 		// The nodes that show a mesh, for its morph target weights (the engine keeps the weights in the mesh):
@@ -5369,6 +5423,10 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			{
 				exported.changes |= KEYS_LIGHT_FLIP;
 			}
+			if (sampler.mode == AnimationComponent::AnimationSampler::Mode::NEAREST)
+			{
+				exported.changes |= KEYS_NEAREST_AS_STEP;
+			}
 			exported.valid = true;
 			return exported;
 		};
@@ -5425,7 +5483,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				if (inserted)
 				{
 					tinygltf::AnimationSampler sampler_builder;
-					sampler_builder.input = get_input_accessor(exported.data_scene, sampler.data, *exported.data);
+					sampler_builder.input = get_input_accessor(exported.data_scene, sampler.data, *exported.data, exported.changes);
 					if (exported.baked)
 					{
 						// The keys are baked for each sampler and retarget, like Scene::RetargetAnimation() bakes them:
@@ -5435,6 +5493,10 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 						if (exported.changes & KEYS_LIGHT_FLIP)
 						{
 							RotateRotationKeys(light_forward_flip, values);
+						}
+						if (exported.changes & KEYS_NEAREST_AS_STEP)
+						{
+							values = nearest_as_step_values(exported.data->keyframe_times, values);
 						}
 						sampler_builder.output = write_accessor(values, exported.type);
 					}

@@ -124,6 +124,17 @@ if (UNIX AND NOT APPLE)
 	add_test(NAME GLTFSkinImportTest COMMAND GLTFSkinImportTest)
 	set_tests_properties(GLTFSkinImportTest PROPERTIES SKIP_RETURN_CODE 77)
 	set_target_properties(GLTFSkinImportTest PROPERTIES FOLDER "Tests")
+
+	# The STEP and NEAREST animation samplers: sampling, glTF import and export (the sampling needs a Vulkan device too)
+	add_executable(GLTFStepAnimationTest
+		GLTFStepAnimationTest.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/../../Editor/ModelImporter_GLTF.cpp
+	)
+	target_include_directories(GLTFStepAnimationTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../Editor)
+	target_link_libraries(GLTFStepAnimationTest PRIVATE WickedEngine)
+	add_test(NAME GLTFStepAnimationTest COMMAND GLTFStepAnimationTest)
+	set_tests_properties(GLTFStepAnimationTest PROPERTIES SKIP_RETURN_CODE 77)
+	set_target_properties(GLTFStepAnimationTest PROPERTIES FOLDER "Tests")
 endif()
 
 

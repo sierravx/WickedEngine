@@ -1814,8 +1814,9 @@ namespace wi::scene
 			enum Mode
 			{
 				LINEAR,
-				STEP,
+				STEP,			// holds the value of a keyframe until the time of the next keyframe (like glTF STEP)
 				CUBICSPLINE,
+				NEAREST,		// takes the value of the nearest keyframe, it changes halfway between keyframes (this was STEP before AnimationComponent version 3)
 				MODE_FORCE_UINT32 = 0xFFFFFFFF
 			} mode = LINEAR;
 
