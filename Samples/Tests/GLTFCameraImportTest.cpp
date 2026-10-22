@@ -99,7 +99,7 @@ namespace
 		{ "name": "InfiniteNode", "camera": 5 },
 		{ "name": "CameraLightNode", "camera": 6, "translation": [ 1, 2, 3 ], "extensions": { "KHR_lights_punctual": { "light": 0 } } },
 		{ "name": "MeshCameraNode", "camera": 7, "mesh": 0 },
-		{ "name": "SkinnedCameraNode", "camera": 8, "mesh": 1, "skin": 0, "extras": { "label": "node", "node": 1 } },
+		{ "name": "SkinnedCameraNode", "camera": 8, "mesh": 1, "skin": 0, "translation": [ 4, 5, 6 ], "extras": { "label": "node", "node": 1 } },
 		{ "name": "Joint" }
 	],
 	"cameras": [
@@ -156,12 +156,34 @@ namespace
 		float zfar;
 	};
 
+	// The camera, or the object, on an entity with the name (the entities of a skinned mesh node all have the node's name)
+	const CameraComponent* CameraNamed(const Scene& scene, const std::string& name)
+	{
+		for (size_t i = 0; i < scene.cameras.GetCount(); ++i)
+		{
+			const NameComponent* entity_name = scene.names.GetComponent(scene.cameras.GetEntity(i));
+			if (entity_name != nullptr && entity_name->name == name)
+				return &scene.cameras[i];
+		}
+		return nullptr;
+	}
+	const ObjectComponent* ObjectNamed(const Scene& scene, const std::string& name)
+	{
+		for (size_t i = 0; i < scene.objects.GetCount(); ++i)
+		{
+			const NameComponent* entity_name = scene.names.GetComponent(scene.objects.GetEntity(i));
+			if (entity_name != nullptr && entity_name->name == name)
+				return &scene.objects[i];
+		}
+		return nullptr;
+	}
+
 	void CheckCameras(Scene& scene, const wi::vector<ExpectedCamera>& expected_cameras, const std::string& what)
 	{
 		Check(scene.cameras.GetCount() == expected_cameras.size(), what + ": not one camera component for each camera node");
 		for (const ExpectedCamera& expected : expected_cameras)
 		{
-			const CameraComponent* camera = scene.cameras.GetComponent(scene.Entity_FindByName(expected.node));
+			const CameraComponent* camera = CameraNamed(scene, expected.node);
 			if (camera == nullptr)
 			{
 				Check(false, what + ": the node " + expected.node + " has no camera");
@@ -174,7 +196,7 @@ namespace
 		}
 	}
 
-	// The camera of a node with a light or a mesh is on the entity of the node
+	// The camera of a node with a light or a mesh is on the entity of the node (of a skinned mesh, on an entity with the node's transform)
 	void CheckCameraNodes(Scene& scene, const std::string& what)
 	{
 		// The light is on a child, which does not turn the camera (the glTF camera looks to -Z, mirrored to +Z in the engine):
@@ -186,9 +208,13 @@ namespace
 		Check(light_hierarchy != nullptr && light_hierarchy->parentID == camera_light, what + ": the light of a node with a camera is not on a child of the node");
 
 		Check(scene.objects.Contains(scene.Entity_FindByName("MeshCameraNode")), what + ": the camera of a node with a mesh is not on the object");
-		const ObjectComponent* skinned = scene.objects.GetComponent(scene.Entity_FindByName("SkinnedCameraNode"));
+		const ObjectComponent* skinned = ObjectNamed(scene, "SkinnedCameraNode");
 		const MeshComponent* skinned_mesh = skinned != nullptr ? scene.meshes.GetComponent(skinned->meshID) : nullptr;
-		Check(skinned_mesh != nullptr && skinned_mesh->armatureID != INVALID_ENTITY, what + ": the camera of a node with a skinned mesh is not on the object");
+		Check(skinned_mesh != nullptr && skinned_mesh->armatureID != INVALID_ENTITY, what + ": the node with a skinned mesh and a camera lost its skinned mesh");
+		// Only the skinned mesh ignores the transform of its node, the camera has it:
+		const CameraComponent* skinned_camera = CameraNamed(scene, "SkinnedCameraNode");
+		Check(skinned_camera != nullptr && Near(skinned_camera->Eye.x, 4) && Near(skinned_camera->Eye.y, 5) && Near(skinned_camera->Eye.z, -6),
+			what + ": the camera of a node with a skinned mesh does not have the node's transform");
 	}
 
 	int RunImport()
@@ -230,7 +256,7 @@ namespace
 		CheckCameras(scene, expected_cameras, "import");
 		CheckCameraNodes(scene, "import");
 
-		// The extras of a node and of its camera (or skin) are merged, the node's own values over its camera's
+		// The extras of a node and of its camera (or skin) are merged, the node's own values over its camera's (or skin's)
 		auto metadata_of = [&](const std::string& name) { return scene.metadatas.GetComponent(scene.Entity_FindByName(name)); };
 		const MetadataComponent* shared_metadata = metadata_of("SharedNode");
 		const MetadataComponent* other_shared_metadata = metadata_of("OtherSharedNode");
@@ -239,8 +265,8 @@ namespace
 			"the extras of a node and its camera were not merged");
 		Check(other_shared_metadata != nullptr && other_shared_metadata->string_values.get("label") == "camera" && other_shared_metadata->int_values.get("shared") == 2,
 			"the extras of a shared camera are not on each of its nodes");
-		Check(skin_metadata != nullptr && skin_metadata->string_values.get("label") == "skin" && skin_metadata->int_values.get("skin") == 1 && skin_metadata->int_values.get("node") == 1,
-			"the extras of a skin and its node were not merged");
+		Check(skin_metadata != nullptr && skin_metadata->string_values.get("label") == "node" && skin_metadata->int_values.get("skin") == 1 && skin_metadata->int_values.get("node") == 1,
+			"the extras of a skin and its node were not merged (with the node's values over the skin's)");
 		for (size_t i = 0; i < scene.metadatas.GetCount(); ++i)
 		{
 			Check(scene.metadatas.GetIndex(scene.metadatas.GetEntity(i)) == i, "an entity has more than one metadata component");

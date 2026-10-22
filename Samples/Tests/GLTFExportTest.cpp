@@ -7,6 +7,7 @@
 #include "tiny_gltf.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstddef>
 #include <cstdio>
@@ -220,6 +221,211 @@ namespace
 		XMFLOAT4 value;
 		XMStoreFloat4(&value, quaternion);
 		return JsonArray({ value.x, value.y, value.z, value.w });
+	}
+
+	// Import: a glTF sampler that animates the rotation of a light node (with nothing else, so the light is the node) and of an
+	//	other node. The light's keys get the rotation of the light (glTF lights point forward, engine lights down), the other
+	//	node's keys must not
+	void CheckSharedSamplerImport()
+	{
+		const XMVECTOR qa = XMQuaternionRotationRollPitchYaw(0.2f, 0.4f, 0.1f);
+		const XMVECTOR qb = XMQuaternionRotationRollPitchYaw(-0.3f, 0.1f, 0.5f);
+		float buffer[10] = { 0, 1 }; // two key times and two rotations
+		static_assert(sizeof(buffer) == 40, "the byteLength and buffer views in the file below");
+		XMStoreFloat4((XMFLOAT4*)&buffer[2], qa);
+		XMStoreFloat4((XMFLOAT4*)&buffer[6], qb);
+		const char* shared_file = "GLTFImportTest_shared.gltf";
+		const char* shared_bin = "GLTFImportTest_shared.bin"; // the uri in the file below
+		bool written = false;
+		if (FILE* bin = fopen(shared_bin, "wb"))
+		{
+			written = fwrite(buffer, sizeof(buffer), 1, bin) == 1;
+			written &= fclose(bin) == 0;
+		}
+		if (FILE* gltf = fopen(shared_file, "w"))
+		{
+			written &= fputs(R"({
+	"asset": { "version": "2.0" },
+	"extensionsUsed": [ "KHR_lights_punctual" ],
+	"extensions": { "KHR_lights_punctual": { "lights": [ { "type": "point", "name": "SharedLight" } ] } },
+	"scene": 0,
+	"scenes": [ { "nodes": [ 0, 1 ] } ],
+	"nodes": [ { "name": "SharedLight", "extensions": { "KHR_lights_punctual": { "light": 0 } } }, { "name": "SharedNode" } ],
+	"buffers": [ { "byteLength": 40, "uri": "GLTFImportTest_shared.bin" } ],
+	"bufferViews": [ { "buffer": 0, "byteOffset": 0, "byteLength": 8 }, { "buffer": 0, "byteOffset": 8, "byteLength": 32 } ],
+	"accessors": [
+		{ "bufferView": 0, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [ 0 ], "max": [ 1 ] },
+		{ "bufferView": 1, "componentType": 5126, "count": 2, "type": "VEC4" }
+	],
+	"animations": [ {
+		"samplers": [ { "input": 0, "output": 1 } ],
+		"channels": [ { "sampler": 0, "target": { "node": 0, "path": "rotation" } }, { "sampler": 0, "target": { "node": 1, "path": "rotation" } } ]
+	} ]
+})", gltf) >= 0;
+			written &= fclose(gltf) == 0;
+		}
+		else
+		{
+			written = false;
+		}
+		Check(written, "the glTF file of the import test could not be written");
+		if (!written)
+		{
+			std::remove(shared_file);
+			std::remove(shared_bin);
+			return;
+		}
+
+		Scene shared;
+		ImportModel_GLTF(shared_file, shared);
+		std::remove(shared_file);
+		std::remove(shared_bin);
+
+		const Entity shared_light = shared.Entity_FindByName("SharedLight");
+		const Entity shared_node = shared.Entity_FindByName("SharedNode");
+		const AnimationDataComponent* light_data = nullptr;
+		const AnimationDataComponent* node_data = nullptr;
+		for (size_t i = 0; i < shared.animations.GetCount(); ++i)
+		{
+			const AnimationComponent& animation = shared.animations[i];
+			for (const AnimationComponent::AnimationChannel& channel : animation.channels)
+			{
+				if (channel.path != Path::ROTATION || channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
+					continue;
+				const AnimationDataComponent* data = shared.animation_datas.GetComponent(animation.samplers[channel.samplerIndex].data);
+				if (channel.target == shared_light)
+					light_data = data;
+				if (channel.target == shared_node)
+					node_data = data;
+			}
+		}
+		// The import rotates the keys of a light by this in the glTF space, then mirrors all keys to the engine space:
+		const XMVECTOR light_rotation = XMQuaternionRotationRollPitchYaw(XM_PIDIV2, 0, 0);
+		auto keys_of = [](const AnimationDataComponent* data, size_t key) { return XMLoadFloat4((const XMFLOAT4*)&data->keyframe_data[key * 4]); };
+		const bool found = shared.lights.Contains(shared_light) && light_data != nullptr && node_data != nullptr && light_data != node_data &&
+			light_data->keyframe_data.size() == 8 && node_data->keyframe_data.size() == 8;
+		Check(found, "a sampler shared by a light and an other node did not import as two datas");
+		if (found)
+		{
+			Check(SameRotation(keys_of(node_data, 0), MirrorRotation(qa)) && SameRotation(keys_of(node_data, 1), MirrorRotation(qb)), "the keys of a node were rotated like the keys of a light sharing their sampler");
+			Check(SameRotation(keys_of(light_data, 0), MirrorRotation(XMQuaternionMultiply(light_rotation, qa))) && SameRotation(keys_of(light_data, 1), MirrorRotation(XMQuaternionMultiply(light_rotation, qb))), "the keys of a light sharing a sampler with an other node did not get the light's rotation");
+		}
+	}
+
+
+	// Import of the names of light entities, and the lights of joints: a node with only a light is the light and keeps the
+	//	node's name (the light's name is used for a node without one, "light" with a number for a light without one too), the
+	//	light of a node with more is on a child named after the light (or after the node, for a light without a name). A joint
+	//	with a light keeps its rotation, the light is on a child. The node names stay after an export and an import.
+	void CheckLightNames()
+	{
+		const std::string names_file = "GLTFImportTest_light_names.gltf";
+		const std::string export_name = "GLTFImportTest_light_names_export";
+		const XMVECTOR joint_rotation = XMQuaternionRotationRollPitchYaw(0.3f, 0.2f, -0.4f);
+		const std::string json = R"({
+	"asset": { "version": "2.0" },
+	"extensionsUsed": [ "KHR_lights_punctual" ],
+	"extensions": { "KHR_lights_punctual": { "lights": [
+		{ "type": "point", "name": "PlainDefinition" },
+		{ "type": "point", "name": "NodelessDefinition" },
+		{ "type": "point" },
+		{ "type": "spot", "name": "SharedDefinition", "spot": { "outerConeAngle": 0.6 } },
+		{ "type": "point", "name": "HolderBulb" },
+		{ "type": "point" },
+		{ "type": "point", "name": "JointBulb" }
+	] } },
+	"scene": 0,
+	"scenes": [ { "nodes": [ 0, 1, 2, 3, 4, 5, 7, 9 ] } ],
+	"nodes": [
+		{ "name": "PlainNode", "extensions": { "KHR_lights_punctual": { "light": 0 } } },
+		{ "extensions": { "KHR_lights_punctual": { "light": 1 } } },
+		{ "extensions": { "KHR_lights_punctual": { "light": 2 } } },
+		{ "name": "ShareA", "extensions": { "KHR_lights_punctual": { "light": 3 } } },
+		{ "name": "ShareB", "extensions": { "KHR_lights_punctual": { "light": 3 } } },
+		{ "name": "Holder", "children": [ 6 ], "extensions": { "KHR_lights_punctual": { "light": 4 } } },
+		{ "name": "HolderChild" },
+		{ "name": "UnnamedHolder", "children": [ 8 ], "extensions": { "KHR_lights_punctual": { "light": 5 } } },
+		{ "name": "UnnamedHolderChild" },
+		{ "name": "Joint", "rotation": )" + JsonArray(joint_rotation) + R"(, "extensions": { "KHR_lights_punctual": { "light": 6 } } }
+	],
+	"skins": [ { "name": "JointSkin", "joints": [ 9 ] } ]
+})";
+		bool written = false;
+		if (FILE* gltf = fopen(names_file.c_str(), "w"))
+		{
+			written = fputs(json.c_str(), gltf) >= 0;
+			written &= fclose(gltf) == 0;
+		}
+		Check(written, "the glTF file of the light names test could not be written");
+		if (!written)
+		{
+			std::remove(names_file.c_str());
+			return;
+		}
+		{
+			tinygltf::TinyGLTF loader;
+			tinygltf::Model model;
+			std::string err, warn;
+			Check(loader.LoadASCIIFromFile(&model, &err, &warn, names_file), "the glTF file of the light names test is not valid: " + err);
+		}
+		Scene scene;
+		ImportModel_GLTF(names_file, scene);
+		std::remove(names_file.c_str());
+
+		auto light_named = [](const Scene& of, const std::string& name) {
+			for (size_t i = 0; i < of.lights.GetCount(); ++i)
+			{
+				const NameComponent* light_name = of.names.GetComponent(of.lights.GetEntity(i));
+				if (light_name != nullptr && light_name->name == name)
+					return of.lights.GetEntity(i);
+			}
+			return INVALID_ENTITY;
+		};
+		auto parent_of = [](const Scene& of, Entity entity) {
+			const HierarchyComponent* hierarchy = of.hierarchy.GetComponent(entity);
+			return hierarchy == nullptr ? INVALID_ENTITY : hierarchy->parentID;
+		};
+		Check(scene.lights.GetCount() == 8, "light names: expected 8 lights, got " + std::to_string(scene.lights.GetCount()));
+		for (const char* node : { "PlainNode", "ShareA", "ShareB" })
+		{
+			Check(scene.lights.Contains(scene.Entity_FindByName(node)), std::string("light names: the light of the node ") + node + " is not the node with its name");
+		}
+		Check(scene.lights.Contains(scene.Entity_FindByName("NodelessDefinition")), "light names: a light node without a name did not get the light's name");
+		bool numbered = false;
+		for (size_t i = 0; i < scene.lights.GetCount(); ++i)
+		{
+			const NameComponent* name = scene.names.GetComponent(scene.lights.GetEntity(i));
+			numbered |= name != nullptr && name->name.rfind("light", 0) == 0 && name->name.size() > 5 && std::isdigit((unsigned char)name->name[5]);
+		}
+		Check(numbered, "light names: a light node without a name and a light without a name did not get a numbered name");
+		Check(scene.Entity_FindByName("SharedDefinition") == INVALID_ENTITY, "light names: the nodes sharing a light got the light's name");
+		const Entity holder_bulb = light_named(scene, "HolderBulb");
+		Check(holder_bulb != INVALID_ENTITY && parent_of(scene, holder_bulb) == scene.Entity_FindByName("Holder") && !scene.lights.Contains(scene.Entity_FindByName("Holder")),
+			"light names: the light of a node with a child is not on a child named after the light");
+		const Entity unnamed_bulb = light_named(scene, "UnnamedHolder");
+		Check(unnamed_bulb != INVALID_ENTITY && parent_of(scene, unnamed_bulb) == scene.Entity_FindByName("UnnamedHolder"),
+			"light names: the light without a name of a node with a child is not on a child named after the node");
+		const Entity joint = scene.Entity_FindByName("Joint");
+		const TransformComponent* joint_transform = scene.transforms.GetComponent(joint);
+		const Entity joint_bulb = light_named(scene, "JointBulb");
+		Check(joint_transform != nullptr && SameRotation(XMLoadFloat4(&joint_transform->rotation_local), MirrorRotation(joint_rotation)) && !scene.lights.Contains(joint) &&
+			joint_bulb != INVALID_ENTITY && parent_of(scene, joint_bulb) == joint, "light names: a joint with a light did not keep its rotation, with the light on a child");
+
+		RemoveOutputFiles(export_name);
+		ExportModel_GLTF(export_name + ".gltf", scene);
+		Scene reimported;
+		ImportModel_GLTF(export_name + ".gltf", reimported);
+		RemoveOutputFiles(export_name);
+		for (const char* node : { "PlainNode", "ShareA", "ShareB", "NodelessDefinition", "Holder", "HolderChild", "UnnamedHolder", "Joint" })
+		{
+			Check(reimported.Entity_FindByName(node) != INVALID_ENTITY, std::string("light names, export and import: the node ") + node + " lost its name");
+		}
+		for (const char* node : { "PlainNode", "ShareA", "ShareB" })
+		{
+			Check(reimported.lights.Contains(reimported.Entity_FindByName(node)), std::string("light names, export and import: the light of the node ") + node + " is not the node");
+		}
+		Check(light_named(reimported, "HolderBulb") != INVALID_ENTITY, "light names, export and import: the light of a node with a child lost its name");
+		Check(reimported.lights.GetCount() == 8, "light names, export and import: expected 8 lights, got " + std::to_string(reimported.lights.GetCount()));
 	}
 
 	// Import and export of glTF nodes with a light (KHR_lights_punctual): (a) a light node with a child node, (b) a node with
@@ -649,6 +855,8 @@ namespace
 			return TEST_FAILED;
 		close(device_created_pipe);
 
+		CheckSharedSamplerImport();
+		CheckLightNames();
 		CheckLightNodes();
 		CheckLightsWithNodes();
 
@@ -894,6 +1102,8 @@ namespace
 			Check(imported.lights.GetCount() == 2 && imported_light != nullptr && imported_second_light != nullptr &&
 				imported_light->GetType() == LightComponent::SPOT && imported_second_light->GetType() == LightComponent::POINT,
 				"the lights did not import back as they were");
+			Check(imported.lights.Contains(imported.Entity_FindByName("Light")) && imported.lights.Contains(imported.Entity_FindByName("SecondLight")),
+				"the lights without more on their nodes did not import back as their nodes");
 		}
 		Check(Near(imported_keys("A", Path::TRANSLATION), last_translation_keys), "the translation keys did not import back as they were");
 		{

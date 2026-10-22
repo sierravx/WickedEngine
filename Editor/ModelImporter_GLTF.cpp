@@ -149,8 +149,11 @@ struct LoaderState
 	tinygltf::Model gltfModel;
 	Scene* scene;
 	wi::unordered_map<int, Entity> entityMap;  // node -> entity
-	std::unordered_multimap<int, Entity> punctualLightMap;  // KHR_lights_punctual -> light entities (children of the nodes)
+	std::unordered_multimap<int, Entity> punctualLightMap;  // KHR_lights_punctual -> light entities (the nodes, or children of them)
 	std::unordered_multimap<int, Entity> cameraMap;  // camera -> entities
+	wi::unordered_set<int> jointNodes; // the nodes that are joints of a skin
+	wi::unordered_set<Entity> rotatedLights; // the light nodes that got the light rotation in their own rotation (and rotation keys)
+	int lightID = 0; // numbers the names of the lights that have no name
 	Entity rootEntity = INVALID_ENTITY;
 
 	//Export states
@@ -166,18 +169,29 @@ void Import_VRMC_Bone(LoaderState& state, Entity boneEntity, const std::string& 
 void Import_Mixamo_Bone(LoaderState& state, Entity boneEntity, const tinygltf::Node& node);
 void Import_Makehuman_Bone(LoaderState& state, Entity boneEntity, const tinygltf::Node& node);
 
-static void ImportMetadata(LoaderState& state, Entity entity, const tinygltf::Value& extras)
+// An entity can get the extras of several glTF objects (a skin and its node, a node and its light or camera), they are merged.
+//	A value replaces the value of the same key that was imported before, unless keep_existing: the node, which is imported
+//	after its skin, wins over the skin, and the extras of a light or a camera (which nodes can share) are imported with
+//	keep_existing, so the node's values win over them too.
+static void ImportMetadata(LoaderState& state, Entity entity, const tinygltf::Value& extras, bool keep_existing = false)
 {
 	if (extras.IsObject())
 	{
-		// An entity can get the extras of several glTF objects (a node and its camera, a skin and its node), they are merged:
 		MetadataComponent* existing = state.scene->metadatas.GetComponent(entity);
 		MetadataComponent& metadata = existing != nullptr ? *existing : state.scene->metadatas.Create(entity);
 
 		for (auto& key : extras.Keys())
 		{
 			if (metadata.bool_values.has(key) || metadata.int_values.has(key) || metadata.float_values.has(key) || metadata.string_values.has(key))
-				continue; // the value imported first stays (a node's own value over its camera's)
+			{
+				if (keep_existing)
+					continue;
+				// (the new value can be of an other type)
+				metadata.bool_values.erase(key);
+				metadata.int_values.erase(key);
+				metadata.float_values.erase(key);
+				metadata.string_values.erase(key);
+			}
 			auto& value = extras.Get(key);
 			switch (value.Type())
 			{
@@ -203,105 +217,14 @@ static void ImportMetadata(LoaderState& state, Entity entity, const tinygltf::Va
 
 }
 
-// In gltf, default light direction is forward, in engine, it's downwards. The light of a node is imported on a child
-//	with this rotation (roll, pitch, yaw in the glTF space), the exporter writes such a child as the light of its parent's node:
+// In gltf, default light direction is forward, in engine, it's downwards. A light node gets this rotation (roll, pitch, yaw in
+//	the glTF space) in its own rotation, or the light of a node with more is imported on a child with this rotation, which the
+//	exporter writes as the light of its parent's node:
 static const XMFLOAT3 GLTF_LIGHT_ROTATION = XMFLOAT3(XM_PIDIV2, 0, 0);
 
-// Recursively loads nodes and resolves hierarchy:
-void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
+// The transform of a glTF node
+static void ApplyNodeTransform(tinygltf::Node& node, TransformComponent& transform)
 {
-	if (nodeIndex < 0 || state.entityMap.count(nodeIndex) != 0)
-	{
-		return;
-	}
-	auto& node = state.gltfModel.nodes[nodeIndex];
-	Scene& scene = *state.scene;
-	Entity entity = INVALID_ENTITY;
-	Entity objectEntity = INVALID_ENTITY;
-
-	if(node.mesh >= 0)
-	{
-		assert(node.mesh < (int)scene.meshes.GetCount());
-
-		if (node.skin >= 0)
-		{
-			// This node is an armature:
-			entity = scene.armatures.GetEntity(node.skin);
-			MeshComponent* mesh = &scene.meshes[node.mesh];
-			Entity meshEntity = scene.meshes.GetEntity(node.mesh);
-			assert(!mesh->vertex_boneindices.empty());
-			if (mesh->armatureID != INVALID_ENTITY)
-			{
-				// Reuse mesh with different skin is not possible currently, so we create a new one:
-				meshEntity = entity;
-				MeshComponent& newMesh = scene.meshes.Create(meshEntity);
-				newMesh = scene.meshes[node.mesh];
-				newMesh.CreateRenderData();
-				mesh = &newMesh;
-			}
-			mesh->armatureID = entity;
-
-			// The object component will use an identity transform but will be parented to the armature:
-			objectEntity = scene.Entity_CreateObject(node.name);
-			ObjectComponent& object = *scene.objects.GetComponent(objectEntity);
-			object.meshID = meshEntity;
-			scene.Component_Attach(objectEntity, entity, true);
-		}
-		else
-		{
-			// This node is a mesh instance:
-			entity = scene.Entity_CreateObject(node.name);
-			objectEntity = entity;
-			ObjectComponent& object = *scene.objects.GetComponent(entity);
-			object.meshID = scene.meshes.GetEntity(node.mesh);
-		}
-	}
-
-	if (node.camera >= 0)
-	{
-		Entity cameraEntity = objectEntity;
-		if (cameraEntity == INVALID_ENTITY)
-		{
-			if (node.name.empty())
-			{
-				static int camID = 0;
-				node.name = "cam" + std::to_string(camID++);
-			}
-
-			entity = scene.Entity_CreateCamera(node.name, 16, 9);
-			cameraEntity = entity;
-		}
-		else
-		{
-			// The camera of a node with a mesh is put on the object, like Entity_CreateCamera() would create it (the object of
-			//	a skinned mesh is under the armature, without the node's transform, like the mesh):
-			scene.cameras.Create(cameraEntity).CreatePerspective(16, 9, 0.01f, 1000.0f, XM_PIDIV4);
-		}
-		state.cameraMap.insert({ node.camera, cameraEntity }); // camera component will be filled later
-	}
-
-	if (entity == INVALID_ENTITY)
-	{
-		entity = CreateEntity();
-		scene.transforms.Create(entity);
-		scene.names.Create(entity) = node.name;
-	}
-
-	state.entityMap[nodeIndex] = entity;
-
-	TransformComponent& transform = *scene.transforms.GetComponent(entity);
-	if (node.mesh >= 0 && node.skin >= 0)
-	{
-		// glTF 2.0 specification, Skins: "Only the joint transforms are applied to
-		// the skinned mesh; the transform of the skinned mesh node MUST be ignored."
-		// Every mesh node of a skin resolves to the same armature entity above, so
-		// applying this node's transform would write it onto the armature shared
-		// by every mesh of that skin.
-		node.scale.clear();
-		node.rotation.clear();
-		node.translation.clear();
-		node.matrix.clear();
-	}
 	if (!node.scale.empty())
 	{
 		// Note: limiting min scale because scale <= 0.0001 will break matrix decompose and mess up the model (float precision issue?)
@@ -343,6 +266,123 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 		transform.world._44 = (float)node.matrix[15];
 		transform.ApplyTransform(); // this creates S, R, T vectors from world matrix
 	}
+}
+
+// Recursively loads nodes and resolves hierarchy:
+void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
+{
+	if (nodeIndex < 0 || state.entityMap.count(nodeIndex) != 0)
+	{
+		return;
+	}
+	auto& node = state.gltfModel.nodes[nodeIndex];
+	Scene& scene = *state.scene;
+	Entity entity = INVALID_ENTITY;
+	Entity objectEntity = INVALID_ENTITY;
+	auto ext_lights_punctual = node.extensions.find("KHR_lights_punctual");
+	const bool has_light = ext_lights_punctual != node.extensions.end();
+	// The camera and the light of a skinned mesh node keep the node's transform (only the skinned mesh ignores it, see below),
+	//	they are put on a child of the armature with that transform:
+	Entity skinnedNodeEntity = INVALID_ENTITY;
+
+	if(node.mesh >= 0)
+	{
+		assert(node.mesh < (int)scene.meshes.GetCount());
+
+		if (node.skin >= 0)
+		{
+			// This node is an armature:
+			entity = scene.armatures.GetEntity(node.skin);
+			MeshComponent* mesh = &scene.meshes[node.mesh];
+			Entity meshEntity = scene.meshes.GetEntity(node.mesh);
+			assert(!mesh->vertex_boneindices.empty());
+			if (mesh->armatureID != INVALID_ENTITY)
+			{
+				// Reuse mesh with different skin is not possible currently, so we create a new one:
+				meshEntity = entity;
+				MeshComponent& newMesh = scene.meshes.Create(meshEntity);
+				newMesh = scene.meshes[node.mesh];
+				newMesh.CreateRenderData();
+				mesh = &newMesh;
+			}
+			mesh->armatureID = entity;
+
+			// The object component will use an identity transform but will be parented to the armature:
+			objectEntity = scene.Entity_CreateObject(node.name);
+			ObjectComponent& object = *scene.objects.GetComponent(objectEntity);
+			object.meshID = meshEntity;
+			scene.Component_Attach(objectEntity, entity, true);
+
+			if (node.camera >= 0 || has_light)
+			{
+				skinnedNodeEntity = CreateEntity();
+				scene.transforms.Create(skinnedNodeEntity);
+				scene.names.Create(skinnedNodeEntity) = node.name;
+			}
+		}
+		else
+		{
+			// This node is a mesh instance:
+			entity = scene.Entity_CreateObject(node.name);
+			objectEntity = entity;
+			ObjectComponent& object = *scene.objects.GetComponent(entity);
+			object.meshID = scene.meshes.GetEntity(node.mesh);
+		}
+	}
+
+	if (node.camera >= 0)
+	{
+		Entity cameraEntity = skinnedNodeEntity != INVALID_ENTITY ? skinnedNodeEntity : objectEntity;
+		if (cameraEntity == INVALID_ENTITY)
+		{
+			if (node.name.empty())
+			{
+				static int camID = 0;
+				node.name = "cam" + std::to_string(camID++);
+			}
+
+			entity = scene.Entity_CreateCamera(node.name, 16, 9);
+			cameraEntity = entity;
+		}
+		else
+		{
+			// The camera of a node with a mesh is put on the object (or with a skinned mesh, on the child of the armature with
+			//	the node's transform), like Entity_CreateCamera() would create it:
+			scene.cameras.Create(cameraEntity).CreatePerspective(16, 9, 0.01f, 1000.0f, XM_PIDIV4);
+		}
+		state.cameraMap.insert({ node.camera, cameraEntity }); // camera component will be filled later
+	}
+
+	if (entity == INVALID_ENTITY)
+	{
+		entity = CreateEntity();
+		scene.transforms.Create(entity);
+		scene.names.Create(entity) = node.name;
+	}
+
+	state.entityMap[nodeIndex] = entity;
+
+	if (node.mesh >= 0 && node.skin >= 0)
+	{
+		if (skinnedNodeEntity != INVALID_ENTITY)
+		{
+			TransformComponent& skinned_node_transform = *scene.transforms.GetComponent(skinnedNodeEntity);
+			ApplyNodeTransform(node, skinned_node_transform);
+			skinned_node_transform.UpdateTransform();
+			scene.Component_Attach(skinnedNodeEntity, entity, true);
+		}
+		// glTF 2.0 specification, Skins: "Only the joint transforms are applied to
+		// the skinned mesh; the transform of the skinned mesh node MUST be ignored."
+		// Every mesh node of a skin resolves to the same armature entity above, so
+		// applying this node's transform would write it onto the armature shared
+		// by every mesh of that skin.
+		node.scale.clear();
+		node.rotation.clear();
+		node.translation.clear();
+		node.matrix.clear();
+	}
+	TransformComponent& transform = *scene.transforms.GetComponent(entity);
+	ApplyNodeTransform(node, transform);
 
 	ImportMetadata(state, entity, node.extras);
 
@@ -353,16 +393,35 @@ void LoadNode(int nodeIndex, Entity parent, LoaderState& state)
 		scene.Component_Attach(entity, parent, true);
 	}
 
-	auto ext_lights_punctual = node.extensions.find("KHR_lights_punctual");
-	if (ext_lights_punctual != node.extensions.end())
+	if (has_light)
 	{
 		// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_lights_punctual
-		//	The light is put on a child with the fixed light rotation, so the node keeps its transform, animation, children,
-		//	mesh or camera as they are (the exporter writes such a child as the light of the node):
-		Entity lightEntity = scene.Entity_CreateLight(""); // light component will be filled later
-		scene.transforms.GetComponent(lightEntity)->RotateRollPitchYaw(GLTF_LIGHT_ROTATION);
-		scene.Component_Attach(lightEntity, entity, true);
 		int index = ext_lights_punctual->second.Get("light").Get<int>();
+		Entity lightEntity = INVALID_ENTITY;
+		if (node.mesh < 0 && node.camera < 0 && node.children.empty() && state.jointNodes.count(nodeIndex) == 0)
+		{
+			// A node with only the light is the light (scripts find it by the node's name). It gets the light rotation in its own
+			//	rotation, and in its rotation keys (see ImportModel_GLTF()), which turns nothing else:
+			lightEntity = entity;
+			scene.lights.Create(lightEntity); // light component will be filled later
+			if (!scene.layers.Contains(lightEntity))
+			{
+				scene.layers.Create(lightEntity); // (like Entity_CreateLight())
+			}
+			TransformComponent& light_transform = *scene.transforms.GetComponent(lightEntity);
+			light_transform.RotateRollPitchYaw(GLTF_LIGHT_ROTATION);
+			light_transform.UpdateTransform();
+			state.rotatedLights.insert(lightEntity);
+		}
+		else
+		{
+			// The light of a node with more (children, a mesh, a camera, a joint of a skin), which the light rotation would turn,
+			//	is put on a child with the fixed light rotation, so the node keeps its transform, animation, children, mesh or
+			//	camera as they are (the exporter writes such a child as the light of the node):
+			lightEntity = scene.Entity_CreateLight(""); // light component will be filled later
+			scene.transforms.GetComponent(lightEntity)->RotateRollPitchYaw(GLTF_LIGHT_ROTATION);
+			scene.Component_Attach(lightEntity, skinnedNodeEntity != INVALID_ENTITY ? skinnedNodeEntity : entity, true);
+		}
 		state.punctualLightMap.insert({ index, lightEntity });
 	}
 
@@ -1573,6 +1632,10 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 	}
 
 	// Create transform hierarchy, assign objects, meshes, armatures, cameras:
+	for (const tinygltf::Skin& skin : state.gltfModel.skins)
+	{
+		state.jointNodes.insert(skin.joints.begin(), skin.joints.end());
+	}
 	const tinygltf::Scene &gltfScene = state.gltfModel.scenes[std::max(0, state.gltfModel.defaultScene)];
 	for (size_t i = 0; i < gltfScene.nodes.size(); i++)
 	{
@@ -1767,7 +1830,31 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 			Entity entity = it->second;
 			LightComponent& light = *scene.lights.GetComponent(entity); // (the light components are not in the order of the glTF lights)
 			NameComponent& name = *scene.names.GetComponent(entity);
-			name = x.name;
+			if (state.rotatedLights.count(entity) > 0)
+			{
+				// The light is the node: it keeps the node's name (animations, scripts and the humanoid find nodes by name), the
+				//	name of the light (which several nodes can share) is only used for a node without one:
+				if (name.name.empty())
+				{
+					name = x.name;
+				}
+			}
+			else
+			{
+				// The light is on a child of the node: it gets the name of the light (which the exporter writes back as the
+				//	light's name), or the node's name for a light without one:
+				name = x.name;
+				const HierarchyComponent* hierarchy = scene.hierarchy.GetComponent(entity);
+				const NameComponent* node_name = hierarchy == nullptr ? nullptr : scene.names.GetComponent(hierarchy->parentID);
+				if (name.name.empty() && node_name != nullptr)
+				{
+					name = node_name->name;
+				}
+			}
+			if (name.name.empty())
+			{
+				name = "light" + std::to_string(state.lightID++);
+			}
 
 			if (!x.type.compare("spot"))
 			{
@@ -1793,10 +1880,64 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 			light.innerConeAngle = float(x.spot.innerConeAngle);
 			light.SetCastShadow(true);
 
-			ImportMetadata(state, entity, x.extras);
+			ImportMetadata(state, entity, x.extras, true);
 		}
 		lightIndex++;
 	}
+
+
+	// The rotation keys of the light nodes that got the light rotation (see LoadNode()) get it too (the exporter undoes it). It is a constant
+	//	rotation multiplied with every key, which also applies to the tangents of cubic spline keys. Data that other channels
+	//	use too gets a copy for the light channels first.
+	if (!state.rotatedLights.empty())
+	{
+		const XMVECTOR light_rotation = XMQuaternionRotationRollPitchYaw(GLTF_LIGHT_ROTATION.x, GLTF_LIGHT_ROTATION.y, GLTF_LIGHT_ROTATION.z);
+		auto light_rotation_channel = [&](const AnimationComponent::AnimationChannel& channel) {
+			return channel.path == AnimationComponent::AnimationChannel::Path::ROTATION && state.rotatedLights.count(channel.target) > 0;
+		};
+		wi::unordered_map<Entity, uint32_t> data_users; // data -> 1: light rotation channels use it, 2: other channels use it
+		for (size_t i = 0; i < scene.animations.GetCount(); ++i)
+		{
+			const AnimationComponent& animation = scene.animations[i];
+			for (const AnimationComponent::AnimationChannel& channel : animation.channels)
+			{
+				if (channel.samplerIndex >= 0 && channel.samplerIndex < (int)animation.samplers.size())
+				{
+					data_users[animation.samplers[channel.samplerIndex].data] |= light_rotation_channel(channel) ? 1u : 2u;
+				}
+			}
+		}
+		wi::unordered_set<Entity> rotated_datas;
+		for (size_t i = 0; i < scene.animations.GetCount(); ++i)
+		{
+			AnimationComponent& animation = scene.animations[i];
+			wi::unordered_map<int, int> copied_samplers; // sampler index -> sampler of the copied data
+			for (AnimationComponent::AnimationChannel& channel : animation.channels)
+			{
+				if (!light_rotation_channel(channel) || channel.samplerIndex < 0 || channel.samplerIndex >= (int)animation.samplers.size())
+					continue;
+				const Entity dataEntity = animation.samplers[channel.samplerIndex].data;
+				if (!scene.animation_datas.Contains(dataEntity))
+					continue;
+				if ((data_users[dataEntity] & 2u) != 0)
+				{
+					auto copied = copied_samplers.find(channel.samplerIndex);
+					if (copied == copied_samplers.end())
+					{
+						copied = copied_samplers.insert({ channel.samplerIndex, CopySamplerData(scene, scene.animations.GetEntity(i), animation, channel.samplerIndex) }).first;
+					}
+					channel.samplerIndex = copied->second;
+				}
+
+				const Entity rotatedEntity = animation.samplers[channel.samplerIndex].data;
+				if (rotated_datas.insert(rotatedEntity).second)
+				{
+					RotateRotationKeys(light_rotation, scene.animation_datas.GetComponent(rotatedEntity)->keyframe_data);
+				}
+			}
+		}
+	}
+
 
 	// Fill cameras (a camera can be used by several nodes, or by none):
 	int cameraIndex = 0;
@@ -1810,11 +1951,12 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 			if (!x.type.compare("orthographic"))
 			{
 				// In gltf, xmag and ymag are half of the width and height of the view, in engine, ortho_vertical_size is the whole height:
+				//	(they should not be negative, which would mirror the projection)
 				if (x.orthographic.xmag != 0 && x.orthographic.ymag != 0)
 				{
-					camera.width = float(x.orthographic.xmag / x.orthographic.ymag);
+					camera.width = float(std::abs(x.orthographic.xmag / x.orthographic.ymag));
 					camera.height = 1.f;
-					camera.ortho_vertical_size = float(x.orthographic.ymag * 2);
+					camera.ortho_vertical_size = float(std::abs(x.orthographic.ymag) * 2);
 				}
 				camera.zFarP = (float)x.orthographic.zfar;
 				camera.zNearP = (float)x.orthographic.znear;
@@ -1835,7 +1977,7 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 				camera.zNearP = (float)x.perspective.znear;
 			}
 
-			ImportMetadata(state, entity, x.extras);
+			ImportMetadata(state, entity, x.extras, true);
 		}
 		cameraIndex++;
 	}
@@ -4947,19 +5089,24 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		if(nameComponent != nullptr)
 			camera_builder.name = nameComponent->name;
 
+		// (a camera without a size, like a CameraComponent that was only created, has no aspect ratio to write)
+		const bool has_aspect = camera.width > 0 && camera.height > 0;
 		if(camera.IsOrtho())
 		{
 			// In gltf, xmag and ymag are half of the width and height of the view, in engine, ortho_vertical_size is the whole height
 			camera_builder.type = "orthographic";
 			camera_builder.orthographic.ymag = camera.ortho_vertical_size * 0.5;
-			camera_builder.orthographic.xmag = camera_builder.orthographic.ymag * camera.width / camera.height;
+			camera_builder.orthographic.xmag = has_aspect ? camera_builder.orthographic.ymag * camera.width / camera.height : camera_builder.orthographic.ymag;
 			camera_builder.orthographic.zfar = camera.zFarP;
 			camera_builder.orthographic.znear = camera.zNearP;
 		}
 		else
 		{
 			camera_builder.type = "perspective";
-			camera_builder.perspective.aspectRatio = camera.width/camera.height;
+			if(has_aspect)
+			{
+				camera_builder.perspective.aspectRatio = camera.width/camera.height;
+			}
 			camera_builder.perspective.yfov = camera.fov;
 			camera_builder.perspective.zfar = camera.zFarP;
 			camera_builder.perspective.znear = camera.zNearP;
